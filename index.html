@@ -62,20 +62,20 @@
       --gold: #f1c203;
 
       /* Glass: panels, dense surfaces, raised controls */
-      --glass: rgba(64, 61, 58, 0.15);
-      --glass-strong: rgba(14, 14, 17, 0.15);
+      --glass: rgba(64, 61, 58, 0.1);
+      --glass-strong: rgba(14, 14, 17, 0.1);
       --glass-raised: rgba(255, 255, 255, 0.05);
       --glass-hover: rgba(255, 255, 255, 0.13);
       --chip: rgba(255, 255, 255, 0.08);
       --seg-track: rgba(0, 0, 0, 0.22);
       --group-bg: rgba(255, 255, 255, 0.045);
       --window-bg: rgba(52, 50, 50, 0.6);
-      --hairline: rgba(255, 255, 255, 0.1);
-      --hairline-inner: rgba(255, 255, 255, 0.08);
+      --hairline: transparent;
+      --hairline-inner: transparent;
       --hairline-strong: rgba(255, 255, 255, 0.14);
       --glass-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 2px 6px rgba(0, 0, 0, 0.2), 0 16px 40px rgba(0, 0, 0, 0.3);
       --float-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 6px 16px rgba(0, 0, 0, 0.3), 0 32px 80px rgba(0, 0, 0, 0.55);
-      --blur: blur(26px) saturate(150%) brightness(0.92);
+      --blur: blur(24px) saturate(150%) brightness(0.95);
       --code-text: #cbd5e1;
       --switch-knob: #f1f5f9;
       --logo-relay: #ffffff;
@@ -102,22 +102,22 @@
       color-scheme: light;
       --bg-primary: #eef3f8;
       --text-primary: #111827;
-      --text-secondary: #475569;
-      --text-muted: #5f6f86;
+      --text-secondary: #334155;
+      --text-muted: #3f4c5f;
       --accent-blue-hover: #0ea5e9;
       --focus: #0284c7;
 
-      --glass: rgba(255, 255, 255, 0.15);
-      --glass-strong: rgba(255, 255, 255, 0.15);
-      --glass-raised: rgba(255, 255, 255, 0.15);
-      --blur: blur(26px) saturate(140%) brightness(1.14);
+      --glass: rgba(255, 255, 255, 0.1);
+      --glass-strong: rgba(255, 255, 255, 0.12);
+      --glass-raised: rgba(255, 255, 255, 0.12);
+      --blur: blur(24px) saturate(140%) brightness(1.07);
       --glass-hover: #ffffff;
       --chip: rgba(15, 23, 42, 0.06);
       --seg-track: rgba(15, 23, 42, 0.05);
       --group-bg: rgba(255, 255, 255, 0.85);
       --window-bg: rgba(246, 248, 251, 0.78);
-      --hairline: rgba(255, 255, 255, 0.6);
-      --hairline-inner: rgba(15, 23, 42, 0.08);
+      --hairline: transparent;
+      --hairline-inner: transparent;
       --hairline-strong: rgba(15, 23, 42, 0.13);
       --glass-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.06), 0 24px 48px -16px rgba(15, 23, 42, 0.1);
       --float-shadow: 0 6px 16px rgba(15, 23, 42, 0.08), 0 32px 80px rgba(15, 23, 42, 0.2);
@@ -148,9 +148,9 @@
     [data-theme="light"][data-mood="dark"] { --glass: rgba(255, 255, 255, 0.93); --glass-strong: #ffffff; }
     [data-theme="dark"][data-mood="light"] { --glass: rgba(34, 33, 35, 0.93); --glass-strong: rgba(20, 20, 23, 0.9); }
     /* Photos (yours or the bundled track): a little more opaque; the veil and slider do the rest. */
-    [data-theme="light"][data-bg="picture"], [data-theme="light"][data-photo] { --glass: rgba(255, 255, 255, 0.15); }
-    [data-theme="dark"][data-bg="picture"] { --glass: rgba(40, 38, 37, 0.15); }
-    [data-theme="dark"][data-photo] { --glass: rgba(48, 46, 45, 0.15); }
+    [data-theme="light"][data-bg="picture"], [data-theme="light"][data-photo] { --glass: rgba(255, 255, 255, 0.1); }
+    [data-theme="dark"][data-bg="picture"] { --glass: rgba(40, 38, 37, 0.1); }
+    [data-theme="dark"][data-photo] { --glass: rgba(48, 46, 45, 0.1); }
 
     /* No backdrop-filter: a more opaque fill instead. */
     @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
@@ -678,16 +678,24 @@
       position: relative;
     }
 
-    .agent-card::before {
+    .agent-card::before, .sidebar::before, .project-banner::before, .composer-card::before, .msg-card::before {
       content: "";
       position: absolute;
-      top: -1px;
+      top: 0;
       left: 22px;
       right: 22px;
-      height: 2px;
+      height: 1.5px;
       border-radius: 2px;
-      background: linear-gradient(90deg, transparent, var(--agent) 22%, var(--agent) 78%, transparent);
+      pointer-events: none;
+      background: linear-gradient(90deg, transparent, var(--agent) 25%, var(--agent) 75%, transparent);
+      box-shadow: 0 0 12px 1px color-mix(in srgb, var(--agent) 55%, transparent);
     }
+
+    .project-banner, .composer-card { position: relative; } /* .sidebar is sticky and .msg-card relative already */
+    .sidebar { --agent: var(--c-sage); }
+    .project-banner { --agent: #f1c203; }
+    .composer-card { --agent: var(--accent-blue); }
+    .msg-card { --agent: var(--c-teal); }
 
     .agent-card.agent-claude { --agent: var(--c-heather); }
     .agent-card.agent-codex { --agent: var(--c-sage); }
