@@ -29,6 +29,14 @@ from typing import Any, Dict, List, Optional
 
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_HTML_PATH = BASE_DIR / "index.html"
+ASSETS_DIR = BASE_DIR / "assets"
+ASSET_TYPES = {
+    ".webp": "image/webp",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+}
 URL_FILE_NAME = ".relay-url"
 
 
@@ -800,6 +808,21 @@ class RelayRequestHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(html_bytes)
 
+    def _send_asset(self, rel_path: str) -> None:
+        # Image files under assets/ only (logo, backgrounds); anything else is not found.
+        root = ASSETS_DIR.resolve()
+        target = (root / rel_path).resolve()
+        if not target.is_relative_to(root) or not target.is_file() or target.suffix.lower() not in ASSET_TYPES:
+            self._send_json(404, {"error": "Not found"})
+            return
+        body = target.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", ASSET_TYPES[target.suffix.lower()])
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "max-age=3600")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _read_json_body(self) -> Dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length <= 0:
@@ -819,6 +842,10 @@ class RelayRequestHandler(http.server.BaseHTTPRequestHandler):
                     self._send_html(200, INDEX_HTML_PATH.read_bytes())
                 else:
                     self._send_html(200, b"<h1>WE Relay running</h1>")
+                return
+
+            if path.startswith("/assets/"):
+                self._send_asset(urllib.parse.unquote(path[len("/assets/"):]))
                 return
 
             if path == "/v1/health":

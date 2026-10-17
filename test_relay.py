@@ -292,6 +292,32 @@ class RelayTestSuite(unittest.TestCase):
         _, all_st = self._req("GET", "/v1/status?project=all")
         self.assertEqual(len(all_st["statuses"]), 2)
 
+    def test_assets_route_serves_images_under_assets_only(self):
+        assets = self.tmp_path / "assets"
+        (assets / "backgrounds").mkdir(parents=True)
+        (assets / "backgrounds" / "track-day.webp").write_bytes(b"RIFF0000WEBP")
+        (assets / "notes.txt").write_text("not an image", encoding="utf-8")
+
+        with mock.patch.object(server, "ASSETS_DIR", assets):
+            url = f"{self.base_url}/assets/backgrounds/track-day.webp"
+            with urllib.request.urlopen(url, timeout=10.0) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.headers["Content-Type"], "image/webp")
+                self.assertEqual(resp.read(), b"RIFF0000WEBP")
+
+            # Outside assets/ (plain or encoded), not an image, a folder, or missing: all 404.
+            for path in (
+                "/assets/../test_relay.db",
+                "/assets/%2e%2e/test_relay.db",
+                "/assets/notes.txt",
+                "/assets/backgrounds/",
+                "/assets/missing.png",
+            ):
+                with self.assertRaises(urllib.error.HTTPError, msg=path) as ctx:
+                    urllib.request.urlopen(f"{self.base_url}{path}", timeout=10.0)
+                self.assertEqual(ctx.exception.code, 404, path)
+                ctx.exception.close()
+
     def test_cross_origin_write_is_refused(self):
         body = json.dumps(
             {"sender": "human", "recipient": "claude", "subject": "Hi", "body": "Hi"}
