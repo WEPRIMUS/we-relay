@@ -62,9 +62,9 @@
       --gold: #f1c203;
 
       /* Glass: panels, dense surfaces, raised controls */
-      --glass: rgba(64, 61, 58, 0.42);
-      --glass-strong: rgba(20, 20, 23, 0.72);
-      --glass-raised: rgba(255, 255, 255, 0.07);
+      --glass: rgba(64, 61, 58, 0.15);
+      --glass-strong: rgba(14, 14, 17, 0.15);
+      --glass-raised: rgba(255, 255, 255, 0.05);
       --glass-hover: rgba(255, 255, 255, 0.13);
       --chip: rgba(255, 255, 255, 0.08);
       --seg-track: rgba(0, 0, 0, 0.22);
@@ -75,7 +75,7 @@
       --hairline-strong: rgba(255, 255, 255, 0.14);
       --glass-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 2px 6px rgba(0, 0, 0, 0.2), 0 16px 40px rgba(0, 0, 0, 0.3);
       --float-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 6px 16px rgba(0, 0, 0, 0.3), 0 32px 80px rgba(0, 0, 0, 0.55);
-      --blur: blur(22px) saturate(140%);
+      --blur: blur(26px) saturate(150%) brightness(0.92);
       --code-text: #cbd5e1;
       --switch-knob: #f1f5f9;
       --logo-relay: #ffffff;
@@ -107,9 +107,10 @@
       --accent-blue-hover: #0ea5e9;
       --focus: #0284c7;
 
-      --glass: rgba(255, 255, 255, 0.55);
-      --glass-strong: rgba(255, 255, 255, 0.9);
-      --glass-raised: rgba(255, 255, 255, 0.8);
+      --glass: rgba(255, 255, 255, 0.15);
+      --glass-strong: rgba(255, 255, 255, 0.15);
+      --glass-raised: rgba(255, 255, 255, 0.15);
+      --blur: blur(26px) saturate(140%) brightness(1.14);
       --glass-hover: #ffffff;
       --chip: rgba(15, 23, 42, 0.06);
       --seg-track: rgba(15, 23, 42, 0.05);
@@ -147,9 +148,9 @@
     [data-theme="light"][data-mood="dark"] { --glass: rgba(255, 255, 255, 0.93); --glass-strong: #ffffff; }
     [data-theme="dark"][data-mood="light"] { --glass: rgba(34, 33, 35, 0.93); --glass-strong: rgba(20, 20, 23, 0.9); }
     /* Photos (yours or the bundled track): a little more opaque; the veil and slider do the rest. */
-    [data-theme="light"][data-bg="picture"], [data-theme="light"][data-photo] { --glass: rgba(255, 255, 255, 0.74); }
-    [data-theme="dark"][data-bg="picture"] { --glass: rgba(40, 38, 37, 0.68); }
-    [data-theme="dark"][data-photo] { --glass: rgba(48, 46, 45, 0.5); }
+    [data-theme="light"][data-bg="picture"], [data-theme="light"][data-photo] { --glass: rgba(255, 255, 255, 0.15); }
+    [data-theme="dark"][data-bg="picture"] { --glass: rgba(40, 38, 37, 0.15); }
+    [data-theme="dark"][data-photo] { --glass: rgba(48, 46, 45, 0.15); }
 
     /* No backdrop-filter: a more opaque fill instead. */
     @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
@@ -270,7 +271,7 @@
     }
 
     [data-photo][data-mood="light"] .veil {
-      background: linear-gradient(180deg, rgba(238, 243, 248, 0.2) 0%, rgba(238, 243, 248, 0.35) 45%, rgba(238, 243, 248, 0.62) 100%);
+      background: linear-gradient(180deg, rgba(238, 243, 248, 0.06) 0%, rgba(238, 243, 248, 0.14) 45%, rgba(238, 243, 248, 0.3) 100%);
       opacity: 1;
     }
 
