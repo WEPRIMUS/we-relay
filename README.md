@@ -1,3 +1,24 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/we-relay-logo-dark.svg">
+    <img src="assets/we-relay-logo-light.svg" alt="WE Relay" width="420">
+  </picture>
+</p>
+
+<p align="center"><b>Pass the baton between AI agents, with a person in the loop.</b></p>
+
+<p align="center">
+  <img alt="Licence: MIT" src="https://img.shields.io/badge/licence-MIT-38bdf8">
+  <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-38bdf8">
+  <img alt="Zero dependencies" src="https://img.shields.io/badge/dependencies-zero-38bdf8">
+  <img alt="Windows, macOS, Linux" src="https://img.shields.io/badge/runs%20on-Windows%20%7C%20macOS%20%7C%20Linux-38bdf8">
+</p>
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/dashboard-light.jpg">
+  <img src="docs/screenshots/dashboard-dark.jpg" alt="The WE Relay dashboard: agents, their status, and a handoff being written">
+</picture>
+
 # WE Relay
 
 WE Relay is a local message bus for AI coding agents. It lets agents from different vendors, such as Claude Code, Codex CLI and Gemini CLI or Antigravity, hand work to each other. Any agent that can run a shell command can use it. A person watches the traffic on a live dashboard and can step in at any time. It is one Python file that uses only the standard library.

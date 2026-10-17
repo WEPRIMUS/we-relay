@@ -2,6 +2,8 @@ FROM python:3.12-slim
 
 WORKDIR /app
 COPY server.py cli.py agent_runner.py index.html ./
+COPY assets ./assets
+COPY agents.example.json ./
 
 # All data (database, Markdown copies, url file) lives in /data. Mount a volume there.
 ENV RELAY_HOST=0.0.0.0
