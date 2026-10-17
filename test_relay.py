@@ -742,3 +742,29 @@ class ApiAgentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class PortableInstallTests(unittest.TestCase):
+    def test_relay_url_and_project_next_to_cli(self):
+        import importlib, shutil, subprocess, sys
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copy(Path(__file__).with_name("cli.py"), Path(tmp) / "cli.py")
+            (Path(tmp) / ".relay-url").write_text("http://127.0.0.1:9", encoding="utf-8")
+            (Path(tmp) / ".relay-project").write_text("team-x", encoding="utf-8")
+            env = {k: v for k, v in os.environ.items() if k not in ("RELAY_URL", "RELAY_HOME", "RELAY_PROJECT")}
+            code = "import cli; print(cli.DEFAULT_BASE_URL); print(cli.DEFAULT_PROJECT)"
+            out = subprocess.run([sys.executable, "-c", code], cwd=tmp, env=env, capture_output=True, text=True, check=True).stdout.split()
+            self.assertEqual(out, ["http://127.0.0.1:9", "team-x"])
+
+
+class NewestFirstLoadTests(unittest.TestCase):
+    def test_first_load_returns_newest_page_oldest_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = server.RelayState(db_path=Path(tmp) / "r.db", handoffs_dir=Path(tmp) / "h")
+            for i in range(1, 206):
+                state.create_message(sender="a", recipient="b", subject=f"m{i}", body="x", project="p")
+            first = state.list_messages(project="p")
+            self.assertEqual([m["id"] for m in first], list(range(6, 206)))
+            later = state.list_messages(project="p", since_id=200)
+            self.assertEqual([m["id"] for m in later], [201, 202, 203, 204, 205])
+

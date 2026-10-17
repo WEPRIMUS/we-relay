@@ -22,7 +22,24 @@ URL_FILE_NAME = ".relay-url"
 
 
 def _relay_home() -> Path:
-    return Path(os.environ.get("RELAY_HOME") or Path.home() / ".we-relay").expanduser()
+    if os.environ.get("RELAY_HOME"):
+        return Path(os.environ["RELAY_HOME"]).expanduser()
+    # Portable install: a .relay-url next to cli.py makes this folder the home, no env vars needed.
+    here = Path(__file__).resolve().parent
+    if (here / URL_FILE_NAME).exists():
+        return here
+    return Path.home() / ".we-relay"
+
+
+def _default_project() -> str:
+    if os.environ.get("RELAY_PROJECT"):
+        return os.environ["RELAY_PROJECT"]
+    project_file = _relay_home() / ".relay-project"
+    try:
+        value = project_file.read_text(encoding="utf-8").strip() if project_file.exists() else ""
+    except Exception:
+        value = ""
+    return value or "default"
 
 
 def _resolve_default_url() -> str:
@@ -40,7 +57,7 @@ def _resolve_default_url() -> str:
 
 
 DEFAULT_BASE_URL = _resolve_default_url()
-DEFAULT_PROJECT = os.environ.get("RELAY_PROJECT", "default")
+DEFAULT_PROJECT = _default_project()
 
 
 def http_json(

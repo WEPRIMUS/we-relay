@@ -366,3 +366,5 @@ WE Relay was built by a small team of AI agents (Claude, Gemini and Codex) worki
 ## Licence
 
 MIT. See [LICENSE](LICENSE). Copyright (c) 2026 WE PRIMUS (Sifa Plus FZE LLC).
+
+The dashboard bundles the **Public Sans** font (`assets/fonts/`), © The Public Sans Project Authors, under the SIL Open Font License 1.1 ([assets/fonts/OFL.txt](assets/fonts/OFL.txt)). It is served locally, with no web-font service.

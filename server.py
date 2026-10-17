@@ -36,6 +36,7 @@ ASSET_TYPES = {
     ".jpeg": "image/jpeg",
     ".png": "image/png",
     ".svg": "image/svg+xml",
+    ".woff2": "font/woff2",
 }
 URL_FILE_NAME = ".relay-url"
 
@@ -411,17 +412,22 @@ class RelayState:
         with self.db_lock:
             conn = self._connect()
             try:
+                # A first load (since_id 0) gets the NEWEST `limit` messages, still oldest-first;
+                # an incremental read (since_id > 0) continues forward from that id.
+                order = "DESC" if since_id <= 0 else "ASC"
                 if project and project.strip().lower() not in ("", "all"):
                     proj_slug = sanitize_slug(project)
                     rows = conn.execute(
-                        "SELECT * FROM messages WHERE id > ? AND project = ? ORDER BY id ASC LIMIT ?",
+                        f"SELECT * FROM messages WHERE id > ? AND project = ? ORDER BY id {order} LIMIT ?",
                         (since_id, proj_slug, limit),
                     ).fetchall()
                 else:
                     rows = conn.execute(
-                        "SELECT * FROM messages WHERE id > ? ORDER BY id ASC LIMIT ?",
+                        f"SELECT * FROM messages WHERE id > ? ORDER BY id {order} LIMIT ?",
                         (since_id, limit),
                     ).fetchall()
+                if order == "DESC":
+                    rows = list(reversed(rows))
                 messages = [self._row_to_message(r) for r in rows]
             finally:
                 conn.close()
