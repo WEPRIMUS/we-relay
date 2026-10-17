@@ -1,0 +1,132 @@
+{
+  "humans": ["human"],
+  "agents": [
+    {
+      "name": "deepseek",
+      "provider": "DeepSeek",
+      "base_url": "https://api.deepseek.com",
+      "model": "deepseek-flash",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "system_prompt": "You are a helpful teammate. Answer what you are asked, clearly and briefly.",
+      "projects": ["default"],
+      "max_turns_per_thread": 6,
+      "docs": "https://api-docs.deepseek.com/quick_start/pricing"
+    },
+    {
+      "name": "qwen",
+      "provider": "Qwen (Alibaba Cloud Model Studio)",
+      "base_url": "https://your-workspace-id.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+      "model": "qwen3.8-flash",
+      "api_key_env": "DASHSCOPE_API_KEY",
+      "system_prompt": "You are a helpful teammate. Answer what you are asked, clearly and briefly.",
+      "projects": ["default"],
+      "max_turns_per_thread": 6,
+      "docs": "https://www.alibabacloud.com/help/en/model-studio/compatibility-of-openai-with-dashscope",
+      "note": "Singapore region. Replace your-workspace-id with the Workspace ID from your Model Studio console. Model list: https://www.alibabacloud.com/help/en/model-studio/getting-started/models"
+    },
+    {
+      "name": "kimi",
+      "provider": "Kimi (Moonshot AI)",
+      "base_url": "https://api.moonshot.ai/v1",
+      "model": "kimi-k3",
+      "api_key_env": "MOONSHOT_API_KEY",
+      "system_prompt": "You are a helpful teammate. Answer what you are asked, clearly and briefly.",
+      "projects": ["default"],
+      "max_turns_per_thread": 6,
+      "docs": "https://platform.kimi.ai/docs/guide/start-using-kimi-api"
+    },
+    {
+      "name": "glm",
+      "provider": "GLM (Z.ai)",
+      "base_url": "https://api.z.ai/api/paas/v4/",
+      "model": "glm-5.3",
+      "api_key_env": "ZAI_API_KEY",
+      "system_prompt": "You are a helpful teammate. Answer what you are asked, clearly and briefly.",
+      "projects": ["default"],
+      "max_turns_per_thread": 6,
+      "docs": "https://docs.z.ai/guides/develop/openai/python",
+      "note": "Zhipu's China platform uses https://open.bigmodel.cn/api/paas/v4/ (https://docs.bigmodel.cn/cn/guide/develop/openai/introduction) with a key from that platform."
+    },
+    {
+      "name": "minimax",
+      "provider": "MiniMax",
+      "base_url": "https://api.minimax.io/v1",
+      "model": "MiniMax-M3",
+      "api_key_env": "MINIMAX_API_KEY",
+      "system_prompt": "You are a helpful teammate. Answer what you are asked, clearly and briefly.",
+      "projects": ["default"],
+      "max_turns_per_thread": 6,
+      "docs": "https://platform.minimax.io/docs/api-reference/text-openai-api"
+    },
+    {
+      "name": "openrouter",
+      "provider": "OpenRouter",
+      "base_url": "https://openrouter.ai/api/v1",
+      "model": "~openai/gpt-sol-latest",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "system_prompt": "You are a helpful teammate. Answer what you are asked, clearly and briefly.",
+      "projects": ["default"],
+      "max_turns_per_thread": 6,
+      "docs": "https://openrouter.ai/docs/quickstart",
+      "note": "Any model id from https://openrouter.ai/models works here, written as provider/model."
+    },
+    {
+      "name": "ollama",
+      "provider": "Ollama (on your computer)",
+      "base_url": "http://localhost:11434/v1",
+      "model": "qwen3:8b",
+      "api_key_env": "",
+      "system_prompt": "You are a helpful teammate. Answer what you are asked, clearly and briefly.",
+      "projects": ["default"],
+      "max_turns_per_thread": 6,
+      "docs": "https://docs.ollama.com/api/openai-compatibility",
+      "note": "No key needed. Run: ollama pull qwen3:8b (or use any model you have pulled)."
+    },
+    {
+      "name": "lmstudio",
+      "provider": "LM Studio (on your computer)",
+      "base_url": "http://localhost:1234/v1",
+      "model": "model-identifier",
+      "api_key_env": "",
+      "system_prompt": "You are a helpful teammate. Answer what you are asked, clearly and briefly.",
+      "projects": ["default"],
+      "max_turns_per_thread": 6,
+      "docs": "https://lmstudio.ai/docs/developer/openai-compat/chat-completions",
+      "note": "No key needed. Replace model-identifier with the id of the model you loaded in LM Studio; http://localhost:1234/v1/models lists them. LM Studio's docs name no default model."
+    },
+    {
+      "name": "openai",
+      "provider": "OpenAI",
+      "base_url": "https://api.openai.com/v1",
+      "model": "gpt-6-luna",
+      "api_key_env": "OPENAI_API_KEY",
+      "system_prompt": "You are a helpful teammate. Answer what you are asked, clearly and briefly.",
+      "projects": ["default"],
+      "max_turns_per_thread": 6,
+      "docs": "https://developers.openai.com/api/docs/models/gpt-6-luna"
+    },
+    {
+      "name": "gemini-api",
+      "provider": "Google Gemini",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+      "model": "gemini-3.8-flash",
+      "api_key_env": "GEMINI_API_KEY",
+      "system_prompt": "You are a helpful teammate. Answer what you are asked, clearly and briefly.",
+      "projects": ["default"],
+      "max_turns_per_thread": 6,
+      "docs": "https://ai.google.dev/gemini-api/docs/openai"
+    },
+    {
+      "name": "anthropic",
+      "provider": "Anthropic",
+      "base_url": "https://api.anthropic.com/v1/",
+      "model": "claude-haiku-5-5",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "system_prompt": "You are a helpful teammate. Answer what you are asked, clearly and briefly.",
+      "projects": ["default"],
+      "max_turns_per_thread": 6,
+      "docs": "https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk",
+      "note": "Model id from https://platform.claude.com/docs/en/about-claude/models/overview. Anthropic describes this OpenAI-compatible layer as mainly for testing and comparison."
+    }
+  ]
+}

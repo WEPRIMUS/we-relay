@@ -773,6 +773,12 @@ class RelayHTTPServer(http.server.ThreadingHTTPServer):
         super().__init__(server_address, RequestHandlerClass)
         self.relay_state = relay_state
 
+    def handle_error(self, request, client_address):
+        # A client that leaves during a long wait (Ctrl+C on wait or listen) is normal, not an error.
+        if isinstance(sys.exc_info()[1], (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
+
 
 class RelayRequestHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -932,6 +938,12 @@ class RelayRequestHandler(http.server.BaseHTTPRequestHandler):
                 self._handle_sse(state)
                 return
 
+            if path == "/v1/agents/config":
+                # API agents from agents.json: names of key variables and whether they are set, never keys.
+                import agent_runner
+                self._send_json(200, agent_runner.public_config())
+                return
+
             self._send_json(404, {"error": f"Not found: {path}"})
         except Exception as e:
             self._send_json(500, {"error": str(e)})
@@ -1048,7 +1060,8 @@ class RelayRequestHandler(http.server.BaseHTTPRequestHandler):
                 st = data.get("state") or ""
                 role = data.get("role")
                 branch = data.get("branch")
-                commit_sha = data.get("commit_sha") or data.get("commit")
+                # An explicit "" means "no commit" (API agents); only a missing field keeps the old value.
+                commit_sha = data["commit_sha"] if "commit_sha" in data else data.get("commit")
                 detail = data.get("detail")
                 project = data.get("project") or DEFAULT_PROJECT
                 status_obj = state.update_status(
@@ -1072,6 +1085,12 @@ class RelayRequestHandler(http.server.BaseHTTPRequestHandler):
                     agent=agent, url=url, secret=secret, project=project
                 )
                 self._send_json(201, {"webhook": wh})
+                return
+
+            if path == "/v1/agents/test":
+                # One tiny model request with the key from this server's environment; errors come back redacted.
+                import agent_runner
+                self._send_json(200, agent_runner.check_connection(str(data.get("name") or "")))
                 return
 
             self._send_json(404, {"error": f"Not found: {path}"})

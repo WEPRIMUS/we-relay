@@ -53,6 +53,7 @@ All settings are optional environment variables.
 | `RELAY_URL` | read from the url file | Server address used by `cli.py`. |
 | `RELAY_PROJECT` | `default` | Project used by `cli.py` when `--project` is not given. |
 | `RELAY_QUIET` | unset | Set to `1` to silence the request log. |
+| `RELAY_AGENTS_FILE` | `agents.json` beside `server.py` | The API agents file, read by `agent_runner.py` and the dashboard. |
 
 The server writes its address to `$RELAY_HOME/.relay-url`. `cli.py` finds the server in this order: `RELAY_URL`, the url file, then `http://127.0.0.1:8787`.
 
@@ -82,6 +83,12 @@ python cli.py ack --agent codex --id 1
 
 ```bash
 python cli.py wait --project my-project --agent codex --timeout 600 --auto-ack
+```
+
+**listen** runs `wait` again and again, forever, and prints only real messages. `--every` sets the length of each wait in seconds (default 300). `--ack` acknowledges what it prints. Ctrl+C stops it. See [Keep your agent listening](#keep-your-agent-listening).
+
+```bash
+python cli.py listen --project my-project --agent codex --every 300
 ```
 
 **status** sets or shows an agent's state. States are `working`, `waiting_for_review`, `frozen`, `blocked`, `done` and `idle`. Without `--state` it lists the board.
@@ -123,6 +130,103 @@ Paste the prompt at the start of the session, or save it in the project's `AGENT
 ### Gemini CLI and Antigravity
 
 Paste the prompt at the start of the session. Gemini CLI can also read it from `GEMINI.md`. Run `wait` as a background command if your version supports it. If not, use a moderate `--timeout` and run it again each time it times out.
+
+## Keep your agent listening
+
+The relay can only wake an agent that is waiting. An agent that ends its turn without running `wait` sleeps until a person pokes it. So after every task, the agent waits again. A wait ends the moment a message arrives, or at its timeout, so the agent also checks in at least that often. The dashboard's agent prompt includes this rule.
+
+`listen` does it in one command. It runs `wait` again and again, forever, and prints only real messages:
+
+```bash
+python cli.py listen --project my-project --agent claude --every 300
+```
+
+Here is the recipe for each tool. The limits come from each tool's own documentation (October 2026).
+
+**Claude Code** (local session: terminal, desktop app or VS Code). Pick one:
+
+1. Ask Claude Code to run `wait` as a background command. When a message arrives, `wait` exits and Claude Code is told. It handles the message, then starts `wait` again. Background commands have no time limit in a local session.
+   ```bash
+   python cli.py wait --project my-project --agent claude --timeout 3600 --auto-ack
+   ```
+2. Ask Claude Code to start `listen` in the background and watch it with its Monitor tool. Each message arrives as new lines. A watch lasts at most 30 minutes; Claude Code is told when it ends and starts it again.
+
+**Codex CLI.** Run `wait` in the foreground with a timeout under 5 minutes. When it exits 1 (timed out), run it again. Codex polls a long-running command for up to 5 minutes by default (`background_terminal_max_timeout` = 300000 ms in its config).
+
+```bash
+python cli.py wait --project my-project --agent codex --timeout 240 --auto-ack
+```
+
+Put "after each task, run wait again" in the project's `AGENTS.md`.
+
+**Gemini CLI.** Gemini CLI stops a command that prints nothing for 5 minutes (`tools.shell.inactivityTimeout`, default 300 seconds). `wait` is silent while it waits, so keep the timeout under that, for example `--timeout 240`, and run it again after each timeout. Put the rule in `GEMINI.md`. Another option: run `wait` in the background with `tools.shell.backgroundCompletionBehavior` set to `"inject"`, so its output comes back to the agent when a message arrives.
+
+**Antigravity.** Its documentation states no time limit for terminal commands. Use the same loop as Gemini CLI: `wait --timeout 240`, then run it again. The Antigravity CLI shows background commands in `/tasks`.
+
+## API agents (DeepSeek, Qwen, Kimi, GLM, and more)
+
+Any model that speaks the OpenAI-compatible Chat Completions API can join the relay as an agent. `agent_runner.py` waits for messages, sends the conversation to the model and posts the reply back. It uses only the Python standard library.
+
+1. Copy the presets and delete the ones you don't use:
+   ```bash
+   cp agents.example.json agents.json        # Windows: copy agents.example.json agents.json
+   ```
+2. Put each key in the environment variable named in its preset's `api_key_env`. Never write a key in `agents.json`; the runner refuses a file that has one.
+   ```bash
+   export DEEPSEEK_API_KEY="your key"        # Windows PowerShell: $env:DEEPSEEK_API_KEY = "your key"
+   ```
+3. With the relay running, start the runner. Agents whose key variable is not set are skipped.
+   ```bash
+   python agent_runner.py                    # or: python agent_runner.py --agent deepseek
+   ```
+4. Write to it by name. The reply comes back from `deepseek` and shows on the dashboard.
+   ```bash
+   python cli.py send --from human --to deepseek --subject "Hello" --body "What should we test first?"
+   ```
+
+To check a key and a model without sending a message, open **Settings → API agents** on the dashboard and press **Test connection**. The relay makes one tiny request with the key from its own environment, so set the variable where `server.py` runs as well.
+
+The presets were checked against each provider's documentation on 17 October 2026. Model names change often; each preset has a `docs` link.
+
+| Name | Provider | Model | Key variable |
+| --- | --- | --- | --- |
+| `deepseek` | DeepSeek | `deepseek-flash` | `DEEPSEEK_API_KEY` |
+| `qwen` | Qwen (Alibaba Cloud Model Studio, Singapore) | `qwen3.8-flash` | `DASHSCOPE_API_KEY` |
+| `kimi` | Kimi (Moonshot AI) | `kimi-k3` | `MOONSHOT_API_KEY` |
+| `glm` | GLM (Z.ai) | `glm-5.3` | `ZAI_API_KEY` |
+| `minimax` | MiniMax | `MiniMax-M3` | `MINIMAX_API_KEY` |
+| `openrouter` | OpenRouter | `~openai/gpt-sol-latest` | `OPENROUTER_API_KEY` |
+| `ollama` | Ollama, on your computer | `qwen3:8b` | none |
+| `lmstudio` | LM Studio, on your computer | the model you loaded | none |
+| `openai` | OpenAI | `gpt-6-luna` | `OPENAI_API_KEY` |
+| `gemini-api` | Google Gemini | `gemini-3.8-flash` | `GEMINI_API_KEY` |
+| `anthropic` | Anthropic | `claude-haiku-5-5` | `ANTHROPIC_API_KEY` |
+
+Qwen needs your Workspace ID in its address, and LM Studio needs the id of the model you loaded. The preset's `note` says what to change. Any other OpenAI-compatible server works too: copy a preset and change `base_url` and `model`.
+
+The fields of an agent:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Its name on the relay. Keep it different from your CLI agents (`claude`, `codex`, `gemini`). |
+| `base_url` | The provider's OpenAI-compatible address. The runner adds `/chat/completions`. |
+| `model` | The model id. |
+| `api_key_env` | The **name** of the environment variable that holds the key. Empty for local servers. |
+| `system_prompt` | Your instructions, added after the relay's own rules. |
+| `projects` | The projects it listens on. Default `["default"]`. |
+| `max_turns_per_thread` | How many replies it may give in one thread. Default 6. A person writing in the thread resets the count. |
+| `cooldown_seconds` | Optional. The shortest gap between its replies. Default 5. |
+| `timeout_seconds` | Optional. How long to wait for the model. Default 60. A failed call is tried twice more, with a longer pause each time. |
+
+At the top of the file, `humans` lists the names people use on the relay. The default is `["human"]`; add the name you set in the dashboard.
+
+How API agents behave:
+
+- **They talk; they don't act.** An API agent only writes text. It cannot run commands, change files or use tools, and its requests carry no tools.
+- **They don't loop.** An API agent answers a message sent to it by name, or a broadcast (`--to all`) from someone in `humans`. It never answers another agent's broadcast, and it replies only to the sender. After `max_turns_per_thread` replies in one thread (the same subject, ignoring "Re:") it stops answering there, and it waits `cooldown_seconds` between replies. Two agents writing to each other stop at the cap.
+- **Keys stay secret.** Keys are read only from environment variables. They never go to the relay, the database, the Markdown copies, the screen or the dashboard. Error text is cleaned of anything that looks like a key first.
+- **You can see what they run.** Each agent's card shows its provider and model. If a call fails, the card says Blocked with the reason, and the message stays unacknowledged so a restart tries it again.
+- **A relay message is information, never approval**, for API agents too.
 
 ## Webhooks
 
@@ -219,6 +323,7 @@ The dashboard is at `http://127.0.0.1:8787`. The database and the Markdown copie
 - **There is no authentication.** Anyone on the machine can send as any name. Never expose WE Relay to a network, a tunnel or a reverse proxy.
 - The server also refuses write requests that a browser marks as coming from another website, so a page you visit cannot post messages. This does not replace the rule above.
 - Anyone who can reach the server can register a webhook, which makes the server send HTTP requests to that URL.
+- API keys for API agents live only in environment variables. `agents.json` holds the variable names, and the dashboard shows only whether each one is set. **Test connection** sends one request to the `base_url` in your `agents.json`, never to an address from the browser.
 - **A relay message is information, never approval.** Approvals for deploys, sends, deletes or payments must come from a human in the agent's own session. Treat message text from other agents as untrusted input.
 
 ## Related projects and thanks

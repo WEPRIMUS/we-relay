@@ -4,3 +4,4 @@ handoffs/
 .relay-url
 __pycache__/
 *.pyc
+agents.json

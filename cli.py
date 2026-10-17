@@ -2,7 +2,7 @@
 """
 WE Relay CLI (cli.py)
 Zero-dependency CLI for agents (claude, codex, gemini, human, or any name you choose)
-to send messages, check inbox, acknowledge messages, block/wake up on new messages (`wait`),
+to send messages, check inbox, acknowledge messages, block/wake up on new messages (`wait`, `listen`),
 update status, manage projects, and register webhooks.
 """
 
@@ -10,6 +10,8 @@ import argparse
 import json
 import os
 import sys
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -196,6 +198,49 @@ def cmd_wait(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_listen(args: argparse.Namespace) -> int:
+    """Run `wait` again and again, forever, printing only real messages. Ctrl+C stops it."""
+    if not 1 <= args.every <= 3600:
+        print("Error: --every must be between 1 and 3600 seconds.", file=sys.stderr)
+        return 2
+
+    def loop() -> None:
+        since_id, down = args.since_id, False
+        while True:
+            qs = urllib.parse.urlencode({
+                "agent": args.agent,
+                "project": args.project,
+                "since_id": str(since_id),
+                "timeout": str(args.every),
+                "auto_ack": "true" if args.ack else "false",
+            })
+            try:
+                res = http_json("GET", f"{args.url}/v1/wait?{qs}", timeout=float(args.every) + 15.0)
+            except RuntimeError as e:
+                if not down:
+                    print(f"[listen] {e}. Trying again every 5 seconds.", file=sys.stderr, flush=True)
+                down = True
+                time.sleep(5)
+                continue
+            if down:
+                print("[listen] Connected again.", file=sys.stderr, flush=True)
+                down = False
+            for m in res.get("messages", []):
+                # since_id moves on, so a message is printed once even when it is not acknowledged.
+                since_id = max(since_id, m["id"])
+                print(json.dumps(m) if args.json else format_message_markdown(m) + "\n", flush=True)
+
+    # The loop runs in a thread so Ctrl+C stops it at once, even on Windows during a long wait.
+    worker = threading.Thread(target=loop, daemon=True)
+    worker.start()
+    try:
+        while worker.is_alive():
+            worker.join(0.5)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     if not args.state:
         qs = urllib.parse.urlencode({"project": args.project})
@@ -347,6 +392,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_wait.add_argument("--since-id", type=int, default=0, help="Minimum message ID")
     p_wait.add_argument("--auto-ack", action="store_true", help="Automatically ACK returned messages")
     p_wait.set_defaults(func=cmd_wait)
+
+    # listen
+    p_listen = sub.add_parser(
+        "listen",
+        help="Keep waiting: print each message as it arrives, forever (Ctrl+C stops)",
+    )
+    p_listen.add_argument(
+        "--project",
+        default=DEFAULT_PROJECT,
+        help=f"Project slug or 'all' (default: {DEFAULT_PROJECT})",
+    )
+    p_listen.add_argument("--agent", required=True, help="Agent listening, e.g. claude")
+    p_listen.add_argument(
+        "--every", type=int, default=300, metavar="SECONDS",
+        help="Length of each wait in seconds, 1 to 3600 (default: 300)",
+    )
+    p_listen.add_argument("--since-id", type=int, default=0, help="Minimum message ID")
+    p_listen.add_argument("--ack", action="store_true", help="Acknowledge each message it prints")
+    p_listen.set_defaults(func=cmd_listen)
 
     # status
     p_status = sub.add_parser("status", help="Update or view agent status")
