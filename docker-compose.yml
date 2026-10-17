@@ -1,0 +1,14 @@
+services:
+  we-relay:
+    build: .
+    container_name: we-relay
+    ports:
+      # Published on the loopback address only. WE Relay has no authentication.
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - ./data:/data
+    environment:
+      - RELAY_HOST=0.0.0.0
+      - RELAY_PORT=8787
+      - RELAY_HOME=/data
+    restart: unless-stopped

@@ -1,0 +1,6 @@
+relay.db*
+*.log
+handoffs/
+.relay-url
+__pycache__/
+*.pyc
