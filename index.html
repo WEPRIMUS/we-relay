@@ -916,18 +916,43 @@
 
     .composer-grid {
       display: grid;
-      grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 2fr) auto;
+      grid-template-columns: minmax(0, 1fr) auto;
       grid-template-areas:
-        "proj from to   subj subj"
-        "body body body body send"
-        "atts atts atts atts atts";
+        "top  top"
+        "body send"
+        "atts atts";
       gap: 8px;
     }
 
-    .c-proj { grid-area: proj; }
-    .c-from { grid-area: from; }
-    .c-to   { grid-area: to; }
-    .c-subj { grid-area: subj; }
+    .composer-top-row {
+      grid-area: top;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+
+    .c-proj {
+      flex: 0 0 auto;
+      min-width: 155px;
+      width: auto;
+    }
+    .c-from {
+      flex: 0 0 auto;
+      width: 110px;
+      min-width: 100px;
+    }
+    .c-to   {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .c-subj {
+      flex: 1 1 220px;
+      min-width: 180px;
+    }
     .c-body { grid-area: body; }
     .c-send {
       grid-area: send;
@@ -1125,13 +1150,12 @@
 
     @container (max-width: 620px) {
       .composer-grid {
-        grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr) auto;
+        grid-template-columns: minmax(0, 1fr);
         grid-template-areas:
-          "proj from to   to"
-          "subj subj subj subj"
-          "body body body body"
-          "send send send send"
-          "atts atts atts atts";
+          "top"
+          "body"
+          "send"
+          "atts";
       }
       .composer-card .sub-note { display: none; }
     }
@@ -1172,17 +1196,22 @@
     .c-to-row {
       display: flex;
       align-items: center;
-      gap: 6px;
+      gap: 8px;
+      flex: 0 0 auto;
     }
-    .c-to-row select, .c-to-row input[type="text"] {
-      flex: 1;
-      min-width: 0;
+    .c-to-row select {
+      min-width: 175px;
+      width: auto;
+    }
+    .c-to-row input[type="text"] {
+      min-width: 140px;
+      width: 150px;
     }
     .priv-toggle {
       display: inline-flex;
       align-items: center;
-      gap: 5px;
-      padding: 6px 10px;
+      gap: 6px;
+      padding: 0 12px;
       border-radius: 10px;
       background: var(--glass-strong);
       border: 1px solid var(--hairline-strong);
@@ -2071,26 +2100,28 @@
         <span class="sub-note">Drop files, paste screenshots (Ctrl+V), or dictate with Mic. Wakes waiting agents.</span>
       </div>
       <form id="composeForm" class="composer-grid" onsubmit="sendMessage(event)">
-        <div class="c-proj">
-          <select id="composeProjectSelect" aria-label="Target Project">
-            <!-- Populated dynamically -->
-          </select>
-        </div>
-        <div class="c-from">
-          <input type="text" id="senderInput" list="senderNames" value="human" placeholder="From" aria-label="From" required />
-          <datalist id="senderNames"></datalist>
-        </div>
-        <div class="c-to c-to-row">
-          <!-- A real picker: a datalist filters by what is typed, so with "all" in the box nobody else showed. -->
-          <select id="recipientSelect" aria-label="To" onchange="onRecipientSelect()"></select>
-          <input type="text" id="recipientInput" value="all" placeholder="Type the agent's name" aria-label="To, another name" hidden required />
-          <label class="priv-toggle" title="Private between the agents only. The operator's dashboard and the database still hold everything.">
-            <input type="checkbox" id="privateCheckbox" aria-label="Private message" />
-            <span>🔒 Private</span>
-          </label>
-        </div>
-        <div class="c-subj">
-          <input type="text" id="subjectInput" placeholder="Subject, e.g. Review ready on feature-x" aria-label="Subject" required />
+        <div class="composer-top-row">
+          <div class="c-proj">
+            <select id="composeProjectSelect" aria-label="Target Project">
+              <!-- Populated dynamically -->
+            </select>
+          </div>
+          <div class="c-from">
+            <input type="text" id="senderInput" list="senderNames" value="human" placeholder="From" aria-label="From" required />
+            <datalist id="senderNames"></datalist>
+          </div>
+          <div class="c-to c-to-row">
+            <!-- A real picker: a datalist filters by what is typed, so with "all" in the box nobody else showed. -->
+            <select id="recipientSelect" aria-label="To" onchange="onRecipientSelect()"></select>
+            <input type="text" id="recipientInput" value="all" placeholder="Type the agent's name" aria-label="To, another name" hidden required />
+            <label class="priv-toggle" title="Private between the agents only. The operator's dashboard and the database still hold everything.">
+              <input type="checkbox" id="privateCheckbox" aria-label="Private message" />
+              <span>🔒 Private</span>
+            </label>
+          </div>
+          <div class="c-subj">
+            <input type="text" id="subjectInput" placeholder="Subject, e.g. Review ready on feature-x" aria-label="Subject" required />
+          </div>
         </div>
         <textarea class="c-body" id="bodyInput" rows="2" placeholder="Your message, in Markdown, or paste screenshots / drop files here…" aria-label="Message"></textarea>
         <div class="c-send">
@@ -2714,7 +2745,7 @@
       const sel = document.getElementById('recipientSelect'), toInput = document.getElementById('recipientInput');
       const current = toInput.value.trim() || 'all';
       const known = ['all', ...names];
-      sel.innerHTML = known.map(n => `<option value="${escapeHtml(n)}">${n === 'all' ? 'To: everyone' : 'To: ' + escapeHtml(n)}</option>`).join('')
+      sel.innerHTML = known.map(n => `<option value="${escapeHtml(n)}">${n === 'all' ? 'To: all (everyone)' : 'To: ' + escapeHtml(n) + ' (CC all)'}</option>`).join('')
         + '<option value="__other">To: someone else…</option>';
       sel.value = known.includes(current) ? current : '__other';
       toInput.hidden = sel.value !== '__other';
