@@ -7,7 +7,9 @@ update status, manage projects, and register webhooks.
 """
 
 import argparse
+import base64
 import json
+import mimetypes
 import os
 import sys
 import threading
@@ -16,7 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 URL_FILE_NAME = ".relay-url"
 
@@ -91,28 +93,49 @@ def http_json(
 def format_message_markdown(m: Dict[str, Any]) -> str:
     ack_str = ", ".join(m.get("ack_by", [])) or "none"
     proj = m.get("project", DEFAULT_PROJECT)
+    delivery = m.get("delivery") or ""
+    is_priv = bool(m.get("is_private", False))
+    badges: List[str] = []
+    if delivery:
+        badges.append(f"[{delivery}]")
+    if is_priv:
+        badges.append("[PRIVATE]")
+    badge_str = (" " + " ".join(badges)) if badges else ""
     lines = [
         f"================================================================================",
-        f"[MESSAGE #{m['id']}] [{proj}] {m['sender'].upper()} -> {m['recipient'].upper()} | {m['created_at']}",
+        f"[MESSAGE #{m['id']}] [{proj}] {m['sender'].upper()} -> {m['recipient'].upper()}{badge_str} | {m['created_at']}",
         f"Subject:   {m['subject']}",
-        f"File:      {m['file_path']}",
-        f"ACKed by:  {ack_str}",
-        f"--------------------------------------------------------------------------------",
-        m.get("body", "").rstrip(),
-        f"================================================================================",
     ]
+    if delivery:
+        lines.append(f"Delivery:  {delivery}" + (" (Private)" if is_priv else ""))
+    elif is_priv:
+        lines.append("Delivery:  PRIVATE")
+    lines.append(f"File:      {m['file_path']}")
+    atts = m.get("attachments") or []
+    if atts:
+        att_paths = ", ".join(f"{a.get('filename', 'file')} ({a.get('path', '')})" for a in atts)
+        lines.append(f"Attached:  {att_paths}")
+    lines.extend(
+        [
+            f"ACKed by:  {ack_str}",
+            f"--------------------------------------------------------------------------------",
+            m.get("body", "").rstrip(),
+            f"================================================================================",
+        ]
+    )
     return "\n".join(lines)
 
 
 def cmd_send(args: argparse.Namespace) -> int:
     body = args.body
     file_path = args.file
-    if not body and not file_path:
+    attach_files: List[str] = getattr(args, "attach", None) or []
+    if not body and not file_path and not attach_files:
         if not sys.stdin.isatty():
             body = sys.stdin.read()
         else:
             print(
-                "Error: Provide --body, --file, or pipe markdown via stdin.",
+                "Error: Provide --body, --file, --attach, or pipe markdown via stdin.",
                 file=sys.stderr,
             )
             return 2
@@ -122,25 +145,58 @@ def cmd_send(args: argparse.Namespace) -> int:
         if p.exists():
             file_path = str(p.resolve())
 
+    uploaded_attachments: List[Dict[str, Any]] = []
+    for att_str in attach_files:
+        ap = Path(att_str)
+        if not ap.is_file():
+            print(f"Error: Attachment file not found: {ap}", file=sys.stderr)
+            return 2
+        ctype, _ = mimetypes.guess_type(ap.name)
+        b64 = base64.b64encode(ap.read_bytes()).decode("ascii")
+        up_res = http_json(
+            "POST",
+            f"{args.url}/v1/attachments",
+            {
+                "filename": ap.name,
+                "content_type": ctype or "application/octet-stream",
+                "data_base64": b64,
+                "project": args.project,
+                "sender": args.sender,
+            },
+        )
+        uploaded_attachments.append(up_res.get("attachment") or up_res)
+
     payload: Dict[str, Any] = {
         "project": args.project,
         "sender": args.sender,
         "recipient": args.to,
         "subject": args.subject,
+        "is_private": bool(getattr(args, "private", False)),
     }
     if body:
         payload["body"] = body
     if file_path:
         payload["file_path"] = file_path
+    if uploaded_attachments:
+        payload["attachments"] = uploaded_attachments
 
     res = http_json("POST", f"{args.url}/v1/messages", payload)
     msg = res["message"]
     if args.json:
         print(json.dumps(msg, indent=2))
     else:
+        atts = msg.get("attachments") or []
+        att_line = (
+            f"\nAttachments: {len(atts)} file(s) ({', '.join(a.get('path', a.get('filename', '')) for a in atts)})"
+            if atts
+            else ""
+        )
+        priv_tag = " [PRIVATE]" if msg.get("is_private") else ""
+        bcast_projs = msg.get("broadcast_projects")
+        proj_lbl = f"ALL ({', '.join(bcast_projs)})" if bcast_projs else msg["project"]
         print(
-            f"Sent message #{msg['id']} [{msg['project']}] ({msg['sender']} -> {msg['recipient']}): {msg['subject']}\n"
-            f"Mirrored file: {msg['file_path']}"
+            f"Sent message #{msg['id']} [{proj_lbl}]{priv_tag} ({msg['sender']} -> {msg['recipient']}): {msg['subject']}\n"
+            f"Mirrored file: {msg['file_path']}{att_line}"
         )
     return 0
 
@@ -367,13 +423,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_send.add_argument(
         "--project",
         default=DEFAULT_PROJECT,
-        help=f"Project slug (default: {DEFAULT_PROJECT})",
+        help=f"Project slug or 'all' (default: {DEFAULT_PROJECT})",
     )
     p_send.add_argument("--from", dest="sender", required=True, help="Sender name, e.g. claude")
     p_send.add_argument("--to", required=True, help="Recipient name, e.g. codex, or 'all'")
     p_send.add_argument("--subject", required=True, help="Message subject line")
     p_send.add_argument("--file", help="Path to existing markdown handoff file")
     p_send.add_argument("--body", help="Markdown message body")
+    p_send.add_argument(
+        "--private",
+        action="store_true",
+        help="Private between sender and recipient (do not Auto-CC team inboxes)",
+    )
+    p_send.add_argument(
+        "--attach",
+        action="append",
+        default=[],
+        help="Path to a file/screenshot/document to upload and attach (may be repeated)",
+    )
     p_send.set_defaults(func=cmd_send)
 
     # inbox

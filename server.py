@@ -9,11 +9,13 @@ Data lives in RELAY_HOME (default ~/.we-relay).
 """
 
 import argparse
+import base64
 import datetime
 import hashlib
 import hmac
 import http.server
 import json
+import mimetypes
 import os
 import re
 import sqlite3
@@ -30,6 +32,13 @@ from typing import Any, Dict, List, Optional
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_HTML_PATH = BASE_DIR / "index.html"
 ASSETS_DIR = BASE_DIR / "assets"
+# Attachment types a browser may show in place. Anything else (HTML, SVG, scripts...) is only ever
+# downloaded, so an uploaded file can never run on the dashboard's origin.
+INLINE_ATTACHMENT_TYPES = {
+    "image/png", "image/jpeg", "image/gif", "image/webp",
+    "audio/webm", "audio/ogg", "audio/mpeg", "audio/wav", "audio/mp4",
+    "video/webm", "video/mp4", "application/pdf", "text/plain",
+}
 ASSET_TYPES = {
     ".webp": "image/webp",
     ".jpg": "image/jpeg",
@@ -54,6 +63,10 @@ def default_handoffs_dir() -> Path:
 
 
 DEFAULT_PROJECT = "default"
+# Senders that count as a person: a message from one of them wakes every waiting agent in the
+# project, even when it is addressed to someone else. Set with RELAY_HUMANS or --humans.
+DEFAULT_HUMANS = ("human",)
+MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 VALID_STATES = {"working", "waiting_for_review", "frozen", "blocked", "done", "idle"}
 
 DEFAULT_AGENT_ROLES = {
@@ -88,8 +101,22 @@ def sanitize_slug(val: str, default: str = DEFAULT_PROJECT) -> str:
     return cleaned or default
 
 
+def sanitize_filename(name: str, default: str = "attachment.bin") -> str:
+    raw = os.path.basename((name or "").strip())
+    if not raw:
+        return default
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", raw).strip("._-")
+    return cleaned or default
+
+
+def parse_humans(raw: Optional[str]) -> frozenset:
+    names = {sanitize_slug(n, default="") for n in (raw or "").split(",")}
+    return frozenset(n for n in names if n) or frozenset(DEFAULT_HUMANS)
+
+
 class RelayState:
-    def __init__(self, db_path: Path, handoffs_dir: Path):
+    def __init__(self, db_path: Path, handoffs_dir: Path, humans: Optional[str] = None):
+        self.humans = parse_humans(humans if humans is not None else os.environ.get("RELAY_HUMANS"))
         self.db_path = Path(db_path)
         self.handoffs_dir = Path(handoffs_dir)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -130,6 +157,8 @@ class RelayState:
                         subject TEXT NOT NULL,
                         body TEXT NOT NULL,
                         file_path TEXT NOT NULL,
+                        attachments TEXT NOT NULL DEFAULT '[]',
+                        is_private INTEGER NOT NULL DEFAULT 0,
                         ack_by TEXT NOT NULL DEFAULT '[]',
                         created_at TEXT NOT NULL
                     );
@@ -158,6 +187,20 @@ class RelayState:
                     );
                     """
                 )
+                # Ensure attachments and is_private columns exist on existing relay.db without data loss
+                msg_cols = {
+                    r["name"]
+                    for r in conn.execute("PRAGMA table_info(messages)").fetchall()
+                }
+                if "attachments" not in msg_cols:
+                    conn.execute(
+                        "ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'"
+                    )
+                if "is_private" not in msg_cols:
+                    conn.execute(
+                        "ALTER TABLE messages ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0"
+                    )
+
                 # Ensure default projects exist
                 now_iso = utc_now_iso()
                 for p in DEFAULT_PROJECTS:
@@ -172,6 +215,60 @@ class RelayState:
                 conn.commit()
             finally:
                 conn.close()
+
+    @property
+    def attachments_dir(self) -> Path:
+        d = self.handoffs_dir / "relay" / "attachments"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def save_attachment(
+        self,
+        filename: str,
+        raw_bytes: bytes,
+        content_type: Optional[str] = None,
+        project: str = DEFAULT_PROJECT,
+        sender: str = "human",
+    ) -> Dict[str, Any]:
+        clean_name = sanitize_filename(filename)
+        ts = utc_now_filename_ts()
+        att_dir = self.attachments_dir
+        saved_name = f"{ts}-{clean_name}"
+        dest = (att_dir / saved_name).resolve()
+        counter = 1
+        while dest.exists():
+            saved_name = f"{ts}-{counter}-{clean_name}"
+            dest = (att_dir / saved_name).resolve()
+            counter += 1
+
+        dest.write_bytes(raw_bytes)
+        guessed_type, _ = mimetypes.guess_type(clean_name)
+        resolved_type = (
+            (content_type or "").strip()
+            or guessed_type
+            or "application/octet-stream"
+        )
+        return {
+            "filename": clean_name,
+            "saved_name": saved_name,
+            "path": str(dest),
+            "url": f"/v1/attachments/{urllib.parse.quote(saved_name)}",
+            "size": len(raw_bytes),
+            "content_type": resolved_type,
+            "project": sanitize_slug(project, default=DEFAULT_PROJECT),
+            "sender": sanitize_slug(sender, default="human"),
+            "created_at": utc_now_iso(),
+        }
+
+    def get_attachment_path(self, saved_name: str) -> Optional[Path]:
+        clean = os.path.basename((saved_name or "").strip())
+        if not clean:
+            return None
+        root = self.attachments_dir.resolve()
+        target = (root / clean).resolve()
+        if not target.is_relative_to(root) or not target.is_file():
+            return None
+        return target
 
     def ensure_project(
         self, slug: str, name: Optional[str] = None, description: str = ""
@@ -253,23 +350,44 @@ class RelayState:
             finally:
                 conn.close()
 
-    def _row_to_message(self, row: sqlite3.Row) -> Dict[str, Any]:
+    def _row_to_message(self, row: sqlite3.Row, viewer_agent: Optional[str] = None) -> Dict[str, Any]:
+        keys = row.keys()
         try:
             ack_by = json.loads(row["ack_by"] or "[]")
         except Exception:
             ack_by = []
-        return {
+        try:
+            raw_att = row["attachments"] if "attachments" in keys else "[]"
+            attachments = json.loads(raw_att or "[]")
+        except Exception:
+            attachments = []
+        is_private = bool(row["is_private"]) if "is_private" in keys else False
+        recipient = row["recipient"]
+        cc = "" if (is_private or recipient == "all") else "all"
+        msg: Dict[str, Any] = {
             "id": row["id"],
             "msg_uuid": row["msg_uuid"],
             "project": row["project"],
             "sender": row["sender"],
-            "recipient": row["recipient"],
+            "recipient": recipient,
+            "cc": cc,
+            "is_private": is_private,
             "subject": row["subject"],
             "body": row["body"],
             "file_path": row["file_path"],
+            "attachments": attachments,
             "ack_by": ack_by,
             "created_at": row["created_at"],
         }
+        if viewer_agent and viewer_agent != "all":
+            v = viewer_agent.strip().lower()
+            if row["sender"] == v:
+                msg["delivery"] = f"SENT (to {recipient})"
+            elif recipient in (v, "all"):
+                msg["delivery"] = "TO YOU"
+            else:
+                msg["delivery"] = f"FYI (to {recipient})"
+        return msg
 
     def _row_to_status(self, row: sqlite3.Row) -> Dict[str, Any]:
         return {
@@ -311,7 +429,31 @@ class RelayState:
         body: Optional[str] = None,
         file_path: Optional[str] = None,
         project: str = DEFAULT_PROJECT,
+        attachments: Optional[List[Dict[str, Any]]] = None,
+        is_private: bool = False,
     ) -> Dict[str, Any]:
+        if (project or "").strip().lower() in ("*", "all"):
+            all_projs = [p["slug"] for p in self.list_projects() if p.get("slug") and p["slug"] != "all"]
+            if not all_projs:
+                all_projs = [DEFAULT_PROJECT]
+            created_msgs = [
+                self.create_message(
+                    sender=sender,
+                    recipient=recipient,
+                    subject=subject,
+                    body=body,
+                    file_path=file_path,
+                    project=p_slug,
+                    attachments=attachments,
+                    is_private=is_private,
+                )
+                for p_slug in all_projs
+            ]
+            first = dict(created_msgs[0])
+            first["broadcast_projects"] = all_projs
+            first["broadcast_message_ids"] = [m["id"] for m in created_msgs]
+            return first
+
         sender = sanitize_slug(sender, default="")
         recipient = sanitize_slug(recipient, default="")
         project = sanitize_slug(project, default=DEFAULT_PROJECT)
@@ -324,9 +466,42 @@ class RelayState:
         if not subject:
             raise ValueError("subject is required")
 
+        is_priv_int = 1 if (is_private and recipient != "all") else 0
+        cc_val = "" if (is_priv_int or recipient == "all") else "all"
+
+        normalized_attachments: List[Dict[str, Any]] = []
+        for att in attachments or []:
+            if not isinstance(att, dict):
+                continue
+            att_path = str(att.get("path") or "").strip()
+            att_name = str(att.get("filename") or os.path.basename(att_path) or "attachment").strip()
+            # The dashboard links to this url, so it may only point at our own attachment route.
+            att_url = str(att.get("url") or "").strip()
+            if not att_url.startswith("/v1/attachments/"):
+                att_url = f"/v1/attachments/{urllib.parse.quote(os.path.basename(att_path))}" if att_path else ""
+            normalized_attachments.append(
+                {
+                    "filename": att_name,
+                    "path": att_path,
+                    "url": att_url,
+                    "size": int(att.get("size") or 0),
+                    "content_type": str(att.get("content_type") or "application/octet-stream"),
+                }
+            )
+
         self.ensure_project(project)
         now_iso = utc_now_iso()
         msg_uuid = str(uuid.uuid4())
+
+        # Format ### Attachments block if attachments are present and not already listed
+        att_md_block = ""
+        if normalized_attachments:
+            lines = ["### Attachments"]
+            for a in normalized_attachments:
+                size_kb = f"{a['size'] / 1024:.1f} KB" if a.get("size") else ""
+                meta = f" ({a['content_type']}{', ' + size_kb if size_kb else ''})" if a.get("content_type") else ""
+                lines.append(f"- **{a['filename']}**{meta}: `{a['path']}`")
+            att_md_block = "\n".join(lines)
 
         resolved_file_path: Path
         if file_path:
@@ -338,10 +513,14 @@ class RelayState:
             resolved_file_path = candidate.resolve()
             if not body:
                 body = resolved_file_path.read_text(encoding="utf-8", errors="replace")
+            if att_md_block and "### Attachments" not in body:
+                body = f"{body.rstrip()}\n\n{att_md_block}"
         else:
-            if body is None or not str(body).strip():
-                raise ValueError("Either body or file_path must be provided")
-            body = str(body)
+            if (body is None or not str(body).strip()) and not normalized_attachments:
+                raise ValueError("Either body, file_path, or attachments must be provided")
+            body = str(body or "").strip()
+            if att_md_block and "### Attachments" not in body:
+                body = f"{body}\n\n{att_md_block}".strip()
             ts = utc_now_filename_ts()
             # Inline-message mirrors live in handoffs/relay/ so the main handoffs folder stays readable.
             mirror_dir = self.handoffs_dir / "relay"
@@ -353,11 +532,13 @@ class RelayState:
                 filename = f"relay-{ts}-{counter}-{sender}-to-{recipient}.md"
                 resolved_file_path = (mirror_dir / filename).resolve()
                 counter += 1
+            cc_line = f"- **CC:** `{cc_val}`\n" if cc_val else ("- **Visibility:** `private`\n" if is_priv_int else "")
             md_content = (
                 f"# {subject}\n\n"
                 f"- **Project:** `{project}`\n"
                 f"- **From:** `{sender}`\n"
                 f"- **To:** `{recipient}`\n"
+                f"{cc_line}"
                 f"- **Timestamp (UTC):** `{now_iso}`\n"
                 f"- **UUID:** `{msg_uuid}`\n\n"
                 f"---\n\n"
@@ -370,8 +551,8 @@ class RelayState:
             try:
                 cur = conn.execute(
                     """
-                    INSERT INTO messages (msg_uuid, project, sender, recipient, subject, body, file_path, ack_by, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO messages (msg_uuid, project, sender, recipient, subject, body, file_path, attachments, is_private, ack_by, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         msg_uuid,
@@ -381,6 +562,8 @@ class RelayState:
                         subject,
                         body,
                         str(resolved_file_path),
+                        json.dumps(normalized_attachments),
+                        is_priv_int,
                         "[]",
                         now_iso,
                     ),
@@ -409,6 +592,7 @@ class RelayState:
         limit: int = 200,
         project: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        norm_agent = agent.strip().lower() if agent else None
         with self.db_lock:
             conn = self._connect()
             try:
@@ -428,23 +612,23 @@ class RelayState:
                     ).fetchall()
                 if order == "DESC":
                     rows = list(reversed(rows))
-                messages = [self._row_to_message(r) for r in rows]
+                messages = [self._row_to_message(r, viewer_agent=norm_agent) for r in rows]
             finally:
                 conn.close()
 
-        if agent:
-            agent = agent.strip().lower()
-            if agent != "all":
+        if norm_agent:
+            if norm_agent != "all":
                 filtered = []
                 for m in messages:
-                    is_for_agent = m["recipient"] == agent or (
-                        m["recipient"] == "all" and m["sender"] != agent
+                    is_for_agent = m["recipient"] == norm_agent or (
+                        (m["recipient"] == "all" or not m.get("is_private", False))
+                        and m["sender"] != norm_agent
                     )
                     if unread_only:
-                        if is_for_agent and agent not in m["ack_by"]:
+                        if is_for_agent and norm_agent not in m["ack_by"]:
                             filtered.append(m)
                     else:
-                        if is_for_agent or m["sender"] == agent:
+                        if is_for_agent or m["sender"] == norm_agent:
                             filtered.append(m)
                 messages = filtered
         elif unread_only:
@@ -470,20 +654,34 @@ class RelayState:
                         "SELECT * FROM messages WHERE id > ? ORDER BY id ASC",
                         (since_id,),
                     ).fetchall()
-                messages = [self._row_to_message(r) for r in rows]
+                messages = [self._row_to_message(r, viewer_agent=agent) for r in rows]
             finally:
                 conn.close()
 
-        matched = []
+        # Unread messages visible to `agent`: addressed to `agent`, to `all`, or Auto-CC (non-private).
+        visible_unread = []
+        has_wake_trigger = False
         for m in messages:
-            if m["recipient"] == agent or (
-                m["recipient"] == "all" and m["sender"] != agent
-            ):
-                if agent not in m["ack_by"]:
-                    matched.append(m)
-        return matched
+            if m["sender"] == agent or agent in m["ack_by"]:
+                continue
+            is_visible = (
+                m["recipient"] == agent
+                or m["recipient"] == "all"
+                or not m.get("is_private", False)
+            )
+            if not is_visible:
+                continue
+            visible_unread.append(m)
+            # Wake only on messages addressed to the agent, to 'all', or sent by a person.
+            # Unread FYI messages ride along in the same batch when woken.
+            if m["recipient"] == agent or m["recipient"] == "all" or m["sender"] in self.humans:
+                has_wake_trigger = True
 
-    def ack_message(self, msg_id: int, agent: str) -> Dict[str, Any]:
+        return visible_unread if has_wake_trigger else []
+
+    def ack_message(
+        self, msg_id: int, agent: str, viewer_agent: Optional[str] = None
+    ) -> Dict[str, Any]:
         agent = sanitize_slug(agent, default="")
         if not agent:
             raise ValueError("Valid agent name is required")
@@ -508,11 +706,12 @@ class RelayState:
                 row = conn.execute(
                     "SELECT * FROM messages WHERE id = ?", (msg_id,)
                 ).fetchone()
-                updated = self._row_to_message(row)
+                sse_updated = self._row_to_message(row)
+                updated = self._row_to_message(row, viewer_agent=viewer_agent)
             finally:
                 conn.close()
 
-        self.broadcast_sse("message", updated)
+        self.broadcast_sse("message", sse_updated)
         return updated
 
     def update_status(
@@ -860,6 +1059,29 @@ class RelayRequestHandler(http.server.BaseHTTPRequestHandler):
                 self._send_asset(urllib.parse.unquote(path[len("/assets/"):]))
                 return
 
+            if path.startswith("/v1/attachments/"):
+                saved_name = urllib.parse.unquote(path[len("/v1/attachments/"):])
+                target = state.get_attachment_path(saved_name)
+                if not target:
+                    self._send_json(404, {"error": f"Attachment not found: {saved_name}"})
+                    return
+                body = target.read_bytes()
+                ctype, _ = mimetypes.guess_type(target.name)
+                inline = ctype in INLINE_ATTACHMENT_TYPES
+                self.send_response(200)
+                self.send_header("Content-Type", ctype if inline else "application/octet-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "max-age=3600")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                if not inline:
+                    self.send_header(
+                        "Content-Disposition",
+                        f'attachment; filename="{target.name}"',
+                    )
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
             if path == "/v1/health":
                 self._send_json(200, {"ok": True, "time": utc_now_iso()})
                 return
@@ -916,7 +1138,7 @@ class RelayRequestHandler(http.server.BaseHTTPRequestHandler):
                 if msgs and auto_ack:
                     acked = []
                     for m in msgs:
-                        acked.append(state.ack_message(m["id"], agent))
+                        acked.append(state.ack_message(m["id"], agent, viewer_agent=agent))
                     msgs = acked
 
                 self._send_json(
@@ -1007,10 +1229,59 @@ class RelayRequestHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+        qs = urllib.parse.parse_qs(parsed.query)
         state: RelayState = self.server.relay_state  # type: ignore
 
         if not self._same_origin():
             self._send_json(403, {"error": "Cross-origin request refused"})
+            return
+
+        if path == "/v1/attachments":
+            try:
+                ctype_hdr = (self.headers.get("Content-Type") or "").lower()
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                if length <= 0:
+                    self._send_json(400, {"error": "Empty attachment payload"})
+                    return
+                if length > MAX_ATTACHMENT_BYTES * 4 // 3 + 4096:  # base64 is a third bigger
+                    self.close_connection = True  # the body is left unread
+                    self._send_json(413, {"error": f"Attachment too large (limit {MAX_ATTACHMENT_BYTES // (1024 * 1024)} MB)"})
+                    return
+                raw_body = self.rfile.read(length)
+                if "application/json" in ctype_hdr:
+                    data = json.loads(raw_body.decode("utf-8"))
+                    filename = data.get("filename") or "attachment.bin"
+                    content_type = data.get("content_type")
+                    project = data.get("project") or DEFAULT_PROJECT
+                    sender = data.get("sender") or "human"
+                    b64_str = data.get("data_base64") or ""
+                    if "," in b64_str and b64_str.lstrip().startswith("data:"):
+                        b64_str = b64_str.split(",", 1)[1]
+                    file_bytes = base64.b64decode(b64_str)
+                else:
+                    filename = (
+                        qs.get("filename", [None])[0]
+                        or self.headers.get("X-Filename")
+                        or "attachment.bin"
+                    )
+                    content_type = ctype_hdr or None
+                    project = qs.get("project", [DEFAULT_PROJECT])[0]
+                    sender = qs.get("sender", ["human"])[0]
+                    file_bytes = raw_body
+
+                if len(file_bytes) > MAX_ATTACHMENT_BYTES:
+                    self._send_json(413, {"error": f"Attachment too large (limit {MAX_ATTACHMENT_BYTES // (1024 * 1024)} MB)"})
+                    return
+                att = state.save_attachment(
+                    filename=filename,
+                    raw_bytes=file_bytes,
+                    content_type=content_type,
+                    project=project,
+                    sender=sender,
+                )
+                self._send_json(201, {**att, "attachment": att})
+            except Exception as e:
+                self._send_json(400, {"error": f"Failed to save attachment: {e}"})
             return
 
         try:
@@ -1039,6 +1310,8 @@ class RelayRequestHandler(http.server.BaseHTTPRequestHandler):
                 body = data.get("body")
                 file_path = data.get("file_path") or data.get("file")
                 project = data.get("project") or DEFAULT_PROJECT
+                attachments = data.get("attachments") or []
+                is_private = bool(data.get("is_private") or data.get("private"))
                 msg = state.create_message(
                     sender=sender,
                     recipient=recipient,
@@ -1046,6 +1319,8 @@ class RelayRequestHandler(http.server.BaseHTTPRequestHandler):
                     body=body,
                     file_path=file_path,
                     project=project,
+                    attachments=attachments,
+                    is_private=is_private,
                 )
                 self._send_json(201, {"message": msg})
                 return
@@ -1143,12 +1418,14 @@ def create_server(
     port: int = 8787,
     db_path: Optional[Path] = None,
     handoffs_dir: Optional[Path] = None,
+    humans: Optional[str] = None,
 ) -> RelayHTTPServer:
     if host not in ("127.0.0.1", "localhost", "0.0.0.0"):
         raise ValueError("Host must be localhost/127.0.0.1 (or 0.0.0.0 inside container)")
     state = RelayState(
         db_path=db_path or default_db_path(),
         handoffs_dir=handoffs_dir or default_handoffs_dir(),
+        humans=humans,
     )
     return RelayHTTPServer((host, port), RelayRequestHandler, state)
 
@@ -1176,6 +1453,12 @@ def main() -> None:
         default=None,
         help="Folder for Markdown copies of messages (default: $RELAY_HANDOFFS_DIR or $RELAY_HOME/handoffs)",
     )
+    parser.add_argument(
+        "--humans",
+        default=None,
+        help="Comma-separated sender names that count as a person, who always wake waiting agents "
+        f"(default: $RELAY_HUMANS or {','.join(DEFAULT_HUMANS)})",
+    )
     args = parser.parse_args()
     db_path = Path(args.db) if args.db else None
     handoffs_dir = Path(args.handoffs_dir) if args.handoffs_dir else None
@@ -1183,13 +1466,13 @@ def main() -> None:
     port = args.port
     try:
         srv = create_server(
-            host=args.host, port=port, db_path=db_path, handoffs_dir=handoffs_dir
+            host=args.host, port=port, db_path=db_path, handoffs_dir=handoffs_dir, humans=args.humans
         )
     except OSError:
         if port == 8787:
             port = 8788
             srv = create_server(
-                host=args.host, port=port, db_path=db_path, handoffs_dir=handoffs_dir
+                host=args.host, port=port, db_path=db_path, handoffs_dir=handoffs_dir, humans=args.humans
             )
         else:
             raise

@@ -14,8 +14,12 @@ Tests:
 10. API agents against a fake OpenAI-compatible server: round trip, retries, key redaction,
     the loop guard (two agents that would ping-pong forever), the config and test endpoints.
 11. `listen` prints each message once, keeps going, and acknowledges with --ack.
+12. v0.2: file attachments (upload, serve, size limit, safe types), Auto-CC with TO YOU / FYI labels,
+    Private messages, wake-up rules (to you, to all, or from a person), all-projects broadcast,
+    and the API-agent guard (no reply to an FYI copy).
 """
 
+import base64
 import contextlib
 import hashlib
 import hmac
@@ -733,15 +737,11 @@ class ApiAgentTests(unittest.TestCase):
         self.assertEqual(codex_text.count("Subject:   Morning plan"), 1)
         self.assertEqual(codex_text.count("Subject:   Only for codex"), 1)
         self.assertEqual(gemini_text.count("Subject:   Morning plan"), 1)
-        self.assertNotIn("Only for codex", gemini_text)
+        self.assertIn("FYI (to codex)", gemini_text)  # a message to someone else arrives as an FYI copy
         self.assertNotIn("Timed out", codex_text)  # timeouts print nothing
         acks = {m["subject"]: m["ack_by"] for m in self.messages()}
         self.assertEqual(acks["Morning plan"], ["gemini"])  # --ack acknowledged; codex did not
-        self.assertEqual(acks["Only for codex"], [])
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+        self.assertEqual(acks["Only for codex"], ["gemini"])  # the FYI copy was acknowledged too
 
 
 class PortableInstallTests(unittest.TestCase):
@@ -768,3 +768,256 @@ class NewestFirstLoadTests(unittest.TestCase):
             later = state.list_messages(project="p", since_id=200)
             self.assertEqual([m["id"] for m in later], [201, 202, 203, 204, 205])
 
+
+class LiveServerCase(unittest.TestCase):
+    """A real server on a free port, with a temporary database and handoffs folder."""
+
+    humans = "human"
+
+    def setUp(self):
+        os.environ["RELAY_QUIET"] = "1"
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.tmp_dir.name)
+        self.handoffs_dir = self.tmp_path / "handoffs"
+        self.srv = server.create_server(
+            host="127.0.0.1", port=0, db_path=self.tmp_path / "test.db",
+            handoffs_dir=self.handoffs_dir, humans=self.humans,
+        )
+        self.base_url = f"http://127.0.0.1:{self.srv.server_address[1]}"
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        self.tmp_dir.cleanup()
+
+    def run_cli(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(Path(cli.__file__)), "--url", self.base_url, *args],
+            capture_output=True, text=True, encoding="utf-8", check=False,
+        )
+
+    def http(self, method, path, payload=None, raw=None, headers=None):
+        """Returns (status, headers, body bytes); HTTP errors are returned, not raised."""
+        data = raw if raw is not None else (json.dumps(payload).encode("utf-8") if payload is not None else None)
+        hdrs = {"Content-Type": "application/json", **(headers or {})}
+        req = urllib.request.Request(f"{self.base_url}{path}", data=data, method=method, headers=hdrs)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, resp.headers, resp.read()
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, e.headers, e.read()
+
+    def upload(self, filename, content, content_type="application/octet-stream", project="demo"):
+        status, _, body = self.http("POST", "/v1/attachments", {
+            "filename": filename, "content_type": content_type,
+            "data_base64": base64.b64encode(content).decode("ascii"), "project": project, "sender": "human",
+        })
+        return status, json.loads(body)
+
+    def wait(self, agent, timeout="1.0", project="demo"):
+        _, _, body = self.http("GET", f"/v1/wait?project={project}&agent={agent}&timeout={timeout}&auto_ack=true")
+        return json.loads(body)
+
+
+class AttachmentTests(LiveServerCase):
+    def test_upload_serve_and_send_message_with_attachment(self):
+        raw_bytes = b"\x89PNG\r\n\x1a\nfake-screenshot-content"
+        status, att = self.upload("screenshot_01.png", raw_bytes, "image/png")
+        self.assertEqual(status, 201)
+        self.assertEqual(att["filename"], "screenshot_01.png")
+        self.assertEqual(att["size"], len(raw_bytes))
+        self.assertTrue(att["url"].startswith("/v1/attachments/"))
+        saved_file = Path(att["path"])
+        self.assertEqual(saved_file.parent.resolve(), (self.handoffs_dir / "relay" / "attachments").resolve())
+        self.assertEqual(saved_file.read_bytes(), raw_bytes)
+
+        status, headers, body = self.http("GET", att["url"])
+        self.assertEqual((status, body), (200, raw_bytes))
+        self.assertEqual(headers["Content-Type"], "image/png")  # pictures show in place
+        self.assertIsNone(headers["Content-Disposition"])
+
+        status, _, body = self.http("POST", "/v1/messages", {
+            "project": "demo", "sender": "human", "recipient": "codex", "subject": "UI screenshot",
+            "body": "Please check this layout.", "attachments": [att],
+        })
+        self.assertEqual(status, 201)
+        created = json.loads(body)["message"]
+        self.assertEqual(len(created["attachments"]), 1)
+        self.assertEqual(created["attachments"][0]["path"], str(saved_file.resolve()))
+        self.assertIn("### Attachments", created["body"])
+        self.assertIn(str(saved_file.resolve()), created["body"])
+        mirror_text = Path(created["file_path"]).read_text(encoding="utf-8")  # the Markdown copy lists it too
+        self.assertIn("### Attachments", mirror_text)
+        self.assertIn(str(saved_file.resolve()), mirror_text)
+
+    def test_attachment_only_message_needs_no_body(self):
+        _, att = self.upload("notes.txt", b"hello", "text/plain")
+        status, _, body = self.http("POST", "/v1/messages", {
+            "project": "demo", "sender": "human", "recipient": "codex", "subject": "Just a file", "attachments": [att],
+        })
+        self.assertEqual(status, 201)
+        self.assertIn("notes.txt", json.loads(body)["message"]["body"])
+
+    def test_cli_send_with_attach_flag(self):
+        sample_doc = self.tmp_path / "notes.md"
+        sample_doc.write_text("# Test Note\nAll systems go.\n", encoding="utf-8")
+        res = self.run_cli(
+            "send", "--project", "demo", "--from", "human", "--to", "gemini",
+            "--subject", "Attached spec", "--body", "See attached file.", "--attach", str(sample_doc),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("Sent message #", res.stdout)
+        self.assertIn("Attachments: 1 file(s)", res.stdout)
+
+    def test_files_that_could_run_in_the_browser_are_only_downloaded(self):
+        _, att = self.upload("page.html", b"<script>alert(1)</script>", "text/html")
+        _, headers, _ = self.http("GET", att["url"])
+        self.assertEqual(headers["Content-Type"], "application/octet-stream")
+        self.assertIn("attachment", headers["Content-Disposition"])
+        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+        _, svg = self.upload("pic.svg", b"<svg onload='alert(1)'/>", "image/svg+xml")
+        self.assertIn("attachment", self.http("GET", svg["url"])[1]["Content-Disposition"])
+
+    def test_attachment_link_cannot_point_anywhere_else(self):
+        status, _, body = self.http("POST", "/v1/messages", {
+            "project": "demo", "sender": "claude", "recipient": "codex", "subject": "Odd link", "body": "x",
+            "attachments": [{"filename": "a.txt", "path": "/tmp/a.txt", "url": "javascript:alert(1)"}],
+        })
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(body)["message"]["attachments"][0]["url"], "/v1/attachments/a.txt")
+
+    def test_oversized_upload_is_refused(self):
+        with mock.patch.object(server, "MAX_ATTACHMENT_BYTES", 1024):
+            status, body = self.upload("big.bin", b"x" * 2048)
+            self.assertEqual(status, 413)
+            self.assertIn("too large", body["error"])
+            self.assertEqual(self.upload("ok.bin", b"x" * 512)[0], 201)
+
+    def test_attachment_names_cannot_escape_the_folder(self):
+        _, att = self.upload("../../evil.txt", b"x", "text/plain")
+        self.assertEqual(Path(att["path"]).parent.resolve(), (self.handoffs_dir / "relay" / "attachments").resolve())
+        self.assertEqual(self.http("GET", "/v1/attachments/..%2F..%2Frelay.db")[0], 404)
+
+
+class TeamVisibilityTests(LiveServerCase):
+    def send(self, sender, to, subject, *extra, project="demo"):
+        res = self.run_cli("send", "--project", project, "--from", sender, "--to", to,
+                           "--subject", subject, "--body", "text", *extra)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return res
+
+    def test_auto_cc_visible_as_fyi_and_private_hidden_from_third_party(self):
+        self.send("claude", "codex", "Schema update")
+        r2 = self.send("claude", "codex", "Secret token note", "--private")
+        self.assertIn("[PRIVATE]", r2.stdout)
+
+        gemini_md = self.run_cli("inbox", "--project", "demo", "--agent", "gemini", "--unread")
+        self.assertIn("Schema update", gemini_md.stdout)
+        self.assertIn("FYI (to codex)", gemini_md.stdout)
+        self.assertNotIn("Secret token note", gemini_md.stdout)
+        gemini_json = json.loads(self.run_cli("--json", "inbox", "--project", "demo", "--agent", "gemini", "--unread").stdout)
+        self.assertEqual([(m["subject"], m["delivery"], m["is_private"]) for m in gemini_json],
+                         [("Schema update", "FYI (to codex)", False)])
+
+        codex_md = self.run_cli("inbox", "--project", "demo", "--agent", "codex", "--unread")
+        self.assertIn("Schema update", codex_md.stdout)
+        self.assertIn("Secret token note", codex_md.stdout)
+        self.assertIn("TO YOU", codex_md.stdout)
+
+        # The dashboard and the database (no agent filter) still hold everything, private included.
+        _, _, body = self.http("GET", "/v1/messages?project=demo")
+        self.assertEqual(len(json.loads(body)["messages"]), 2)
+
+    def test_sender_sees_own_messages_as_sent(self):
+        self.send("claude", "codex", "Mine")
+        self.send("claude", "all", "To everyone")
+        msgs = json.loads(self.run_cli("--json", "inbox", "--project", "demo", "--agent", "claude").stdout)
+        self.assertEqual([m["delivery"] for m in msgs], ["SENT (to codex)", "SENT (to all)"])
+
+    def test_wait_does_not_wake_on_fyi_and_wakes_on_direct_all_or_a_person(self):
+        self.send("claude", "codex", "Peer note to codex")  # agent to agent: FYI for gemini, no wake
+        res = self.wait("gemini", "0.25")
+        self.assertTrue(res["timed_out"])
+        self.assertEqual(res["messages"], [])
+
+        # A person's message wakes gemini, and the earlier unread FYI rides along in the same batch.
+        self.send("human", "codex", "Human directive")
+        res = self.wait("gemini")
+        self.assertFalse(res["timed_out"])
+        self.assertEqual([m["subject"] for m in res["messages"]], ["Peer note to codex", "Human directive"])
+        self.assertEqual(res["messages"][0]["delivery"], "FYI (to codex)")
+
+        self.send("codex", "gemini", "Direct to gemini")
+        res = self.wait("gemini")
+        self.assertEqual([m["subject"] for m in res["messages"]], ["Direct to gemini"])
+        self.assertEqual(res["messages"][0]["delivery"], "TO YOU")
+
+        self.send("claude", "all", "Broadcast")
+        self.assertEqual([m["subject"] for m in self.wait("gemini")["messages"]], ["Broadcast"])
+
+    def test_private_message_never_wakes_a_third_agent(self):
+        self.send("human", "codex", "Secret", "--private")
+        self.assertTrue(self.wait("gemini", "0.25")["timed_out"])
+        self.assertEqual([m["subject"] for m in self.wait("codex")["messages"]], ["Secret"])
+
+    def test_send_project_all_lands_one_message_per_project(self):
+        self.run_cli("projects", "--add", "demo", "--name", "Demo")
+        self.run_cli("projects", "--add", "ops", "--name", "Ops")
+        r = self.run_cli("send", "--project", "all", "--from", "human", "--to", "all",
+                         "--subject", "Global announcement", "--body", "All hands check in.")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ALL (", r.stdout)
+        for slug in ("default", "demo", "ops"):
+            _, _, body = self.http("GET", f"/v1/messages?project={slug}")
+            matching = [m for m in json.loads(body)["messages"] if m["subject"] == "Global announcement"]
+            self.assertEqual(len(matching), 1, f"Expected 1 message in {slug}, got {len(matching)}")
+
+    def test_api_agent_ignores_fyi_message_addressed_to_another_agent(self):
+        agent_cfg = {
+            "name": "gemini-bot", "provider": "Fake", "base_url": "http://127.0.0.1:9/v1", "api_key_env": "",
+            "model": "fake-model", "projects": ["demo"], "system_prompt": "", "temperature": 0.2,
+            "max_tokens": 100, "timeout_seconds": 5, "max_turns_per_thread": 4, "cooldown_seconds": 0,
+        }
+        # A person writes to codex. gemini-bot is woken (a person wrote) and gets it as an FYI copy.
+        created = self.srv.relay_state.create_message(
+            sender="human", recipient="codex", subject="Task for codex only",
+            body="Codex, please review the schema.", project="demo",
+        )
+        worker = agent_runner.AgentWorker(agent_cfg, "demo", self.base_url, ["human"], threading.Event())
+        with mock.patch.object(agent_runner, "chat") as mock_chat, contextlib.redirect_stdout(io.StringIO()):
+            worker.handle(created)
+            mock_chat.assert_not_called()  # no model call, so no reply either
+
+        msgs = self.srv.relay_state.list_messages(project="demo")
+        self.assertEqual(len(msgs), 1)  # still only the original message
+        self.assertIn("gemini-bot", msgs[0]["ack_by"])  # but it was acknowledged
+
+
+class HumanSendersTests(LiveServerCase):
+    humans = "boss, Lead"  # names are cleaned like every other name
+
+    def test_wake_follows_the_configured_people(self):
+        for sender in ("human", "claude"):  # not people on this server
+            self.run_cli("send", "--project", "demo", "--from", sender, "--to", "codex", "--subject", f"From {sender}", "--body", "x")
+        self.assertTrue(self.wait("gemini", "0.25")["timed_out"])
+        self.run_cli("send", "--project", "demo", "--from", "lead", "--to", "codex", "--subject", "From lead", "--body", "x")
+        self.assertEqual([m["subject"] for m in self.wait("gemini")["messages"]], ["From human", "From claude", "From lead"])
+
+    def test_parse_humans(self):
+        self.assertEqual(server.parse_humans(None), frozenset({"human"}))
+        self.assertEqual(server.parse_humans(" , "), frozenset({"human"}))
+        self.assertEqual(server.parse_humans("Boss,lead"), frozenset({"boss", "lead"}))
+
+
+class DashboardTests(LiveServerCase):
+    def test_dashboard_serves_the_v02_controls(self):
+        _, _, body = self.http("GET", "/")
+        html = body.decode("utf-8")
+        for needle in ("attachFileInput", "micBtn", "privateCheckbox", "URLSearchParams(location.search)", "document.title"):
+            self.assertIn(needle, html)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
