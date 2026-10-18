@@ -27,6 +27,8 @@ import http.server
 import io
 import json
 import os
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -376,6 +378,26 @@ class DataHomeTests(unittest.TestCase):
         with mock.patch.dict(os.environ):
             os.environ.pop("RELAY_HOME", None)
             self.assertEqual(server.relay_home(), Path.home() / ".we-relay")
+
+    def test_dropped_connection_is_a_runtimeerror(self):
+        # A relay that goes away mid-wait resets the connection while the reply is read. Callers
+        # (listen, the API agents) retry on RuntimeError, so it must not escape as a raw socket error.
+        lsock = socket.socket()
+        lsock.bind(("127.0.0.1", 0))
+        lsock.listen(1)
+
+        def drop():
+            conn, _ = lsock.accept()
+            conn.recv(65536)
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))  # close with a reset
+            conn.close()
+
+        threading.Thread(target=drop, daemon=True).start()
+        try:
+            with self.assertRaises(RuntimeError):
+                cli.http_json("GET", f"http://127.0.0.1:{lsock.getsockname()[1]}/v1/wait", timeout=5)
+        finally:
+            lsock.close()
 
     def test_cli_finds_server_by_env_then_url_file_then_default(self):
         with tempfile.TemporaryDirectory() as tmp:

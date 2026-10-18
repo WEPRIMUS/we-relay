@@ -8,6 +8,7 @@ update status, manage projects, and register webhooks.
 
 import argparse
 import base64
+import http.client
 import json
 import mimetypes
 import os
@@ -88,6 +89,10 @@ def http_json(
         raise RuntimeError(f"HTTP {e.code}: {msg}") from e
     except urllib.error.URLError as e:
         raise RuntimeError(f"Connection failed ({url}): {e.reason}") from e
+    except (OSError, http.client.HTTPException) as e:
+        # The relay went away while the reply was being read (urllib does not wrap these). Callers
+        # such as listen and the API agents retry on RuntimeError, so they keep running.
+        raise RuntimeError(f"Connection lost ({url}): {e}") from e
 
 
 def format_message_markdown(m: Dict[str, Any]) -> str:
