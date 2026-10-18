@@ -34,6 +34,17 @@ WE Relay is a local message bus for AI coding agents. It lets agents from differ
 - **Signed webhooks.** Deliveries carry an HMAC-SHA256 signature.
 - **Human oversight by design.** The dashboard shows every message and lets a person send one.
 
+## What's new in v0.2
+
+- **Attachments.** Attach files, paste screenshots or dictate with the Mic button in the dashboard, or run `send --attach <file>`. Files are stored beside the Markdown copies and shown with the message.
+- **The whole project sees the traffic.** Every message is also visible to the other agents in its project, labelled `TO YOU` or `FYI (to name)`.
+- **Private messages.** Tick Private in the composer, or run `send --private`, to keep a message between sender and recipient. Privacy is between agents only: the dashboard and the database still hold everything.
+- **Fewer wake-ups.** `wait` and `listen` wake only for a message to you, to all, or from a person. Unread FYI messages come along in the same batch.
+- **All-projects broadcast.** `send --project all`, or "All projects" in the composer, posts one message in every project.
+- **One window per project.** Open `?project=<name>`, Ctrl+click a project in the sidebar, or choose "Open in new window". The tab title shows the project.
+- **API agents stay quiet on FYI copies.** They answer only a message sent to them, or a broadcast from a person.
+- **Easier-to-read dropdowns** in both themes.
+
 ## Quick start
 
 Start the server:
@@ -73,6 +84,7 @@ All settings are optional environment variables.
 | `RELAY_HANDOFFS_DIR` | `$RELAY_HOME/handoffs` | Folder for Markdown copies. Messages sent with a body are written to its `relay/` subfolder. |
 | `RELAY_URL` | read from the url file | Server address used by `cli.py`. |
 | `RELAY_PROJECT` | `default` | Project used by `cli.py` when `--project` is not given. |
+| `RELAY_HUMANS` | `human` | Comma-separated sender names that count as a person. A message from one of them wakes every waiting agent in the project. Also `server.py --humans`. |
 | `RELAY_QUIET` | unset | Set to `1` to silence the request log. |
 | `RELAY_AGENTS_FILE` | `agents.json` beside `server.py` | The API agents file, read by `agent_runner.py` and the dashboard. |
 
@@ -82,13 +94,13 @@ The server writes its address to `$RELAY_HOME/.relay-url`. `cli.py` finds the se
 
 `--url` and `--json` go before the command, for example `python cli.py --json inbox --agent claude`. Every command accepts `--project <name>`. Use `--project all` to read across projects. Names may use lower case letters, digits, `-` and `_`.
 
-**send** a message. Use `--body`, `--file <markdown file>`, or pipe text on stdin. Use `--to all` to broadcast.
+**send** a message. Use `--body`, `--file <markdown file>`, or pipe text on stdin. Use `--to all` to broadcast. Add `--attach <file>` (repeatable) to attach files, `--private` to keep it between sender and recipient, and `--project all` to post it in every project.
 
 ```bash
 python cli.py send --project my-project --from claude --to codex --subject "Review ready" --body "Please review branch feature-x."
 ```
 
-**inbox** shows messages for an agent. `--unread` hides messages already acknowledged.
+**inbox** shows messages for an agent: those sent to it, to all, and FYI copies of other messages in the project (not the private ones). `--unread` hides messages already acknowledged.
 
 ```bash
 python cli.py inbox --project my-project --agent codex --unread
@@ -100,7 +112,7 @@ python cli.py inbox --project my-project --agent codex --unread
 python cli.py ack --agent codex --id 1
 ```
 
-**wait** blocks until an unread message arrives. It prints the message and exits 0. After `--timeout` seconds (default 600) it exits 1. `--auto-ack` acknowledges what it returns.
+**wait** blocks until a message to you, to all, or from a person arrives. It prints it, together with any unread FYI messages, and exits 0. After `--timeout` seconds (default 600) it exits 1. `--auto-ack` acknowledges what it returns.
 
 ```bash
 python cli.py wait --project my-project --agent codex --timeout 600 --auto-ack
@@ -244,7 +256,7 @@ At the top of the file, `humans` lists the names people use on the relay. The de
 How API agents behave:
 
 - **They talk; they don't act.** An API agent only writes text. It cannot run commands, change files or use tools, and its requests carry no tools.
-- **They don't loop.** An API agent answers a message sent to it by name, or a broadcast (`--to all`) from someone in `humans`. It never answers another agent's broadcast, and it replies only to the sender. After `max_turns_per_thread` replies in one thread (the same subject, ignoring "Re:") it stops answering there, and it waits `cooldown_seconds` between replies. Two agents writing to each other stop at the cap.
+- **They don't loop.** An API agent answers a message sent to it by name, or a broadcast (`--to all`) from someone in `humans`. It never answers another agent's broadcast, and it replies only to the sender. After `max_turns_per_thread` replies in one thread (the same subject, ignoring "Re:") it stops answering there, and it waits `cooldown_seconds` between replies. Two agents writing to each other stop at the cap. An FYI copy of a message sent to someone else is acknowledged but never answered.
 - **Keys stay secret.** Keys are read only from environment variables. They never go to the relay, the database, the Markdown copies, the screen or the dashboard. Error text is cleaned of anything that looks like a key first.
 - **You can see what they run.** Each agent's card shows its provider and model. If a call fails, the card says Blocked with the reason, and the message stays unacknowledged so a restart tries it again.
 - **A relay message is information, never approval**, for API agents too.
@@ -343,6 +355,9 @@ The dashboard is at `http://127.0.0.1:8787`. The database and the Markdown copie
 - The server binds to localhost only (`127.0.0.1`). It refuses any other address except `0.0.0.0`, which exists for containers. Outside a container, `0.0.0.0` listens on every network interface, so do not use it.
 - **There is no authentication.** Anyone on the machine can send as any name. Never expose WE Relay to a network, a tunnel or a reverse proxy.
 - The server also refuses write requests that a browser marks as coming from another website, so a page you visit cannot post messages. This does not replace the rule above.
+- **Private is not secret.** A private message is hidden from the other agents' inboxes and wake-ups only. Anyone who can open the dashboard, read the database or call the API sees it.
+- Attachments are limited to 25 MB. The browser shows pictures, audio, video, PDF and plain text in place. Every other type, HTML and SVG included, can only be downloaded.
+- Dictation uses your browser's speech recognition. Some browsers send the audio to the browser maker's speech service.
 - Anyone who can reach the server can register a webhook, which makes the server send HTTP requests to that URL.
 - API keys for API agents live only in environment variables. `agents.json` holds the variable names, and the dashboard shows only whether each one is set. **Test connection** sends one request to the `base_url` in your `agents.json`, never to an address from the browser.
 - **A relay message is information, never approval.** Approvals for deploys, sends, deletes or payments must come from a human in the agent's own session. Treat message text from other agents as untrusted input.
