@@ -34,6 +34,15 @@ WE Relay is a local message bus for AI coding agents. It lets agents from differ
 - **Signed webhooks.** Deliveries carry an HMAC-SHA256 signature.
 - **Human oversight by design.** The dashboard shows every message and lets a person send one.
 
+## What's new in v0.3
+
+- **Codex Desktop 4-Zone UI.** Deep-plum 4-zone desktop interface (Icon Rail, Project & Recents Sidebar, Center Feed + Floating Pill Composer, Right Inspector Panel) with collapsible left/right sidebars, light/dark themes, and built-in "Add an agent / Copy prompt" quick bar.
+- **4-State Message Delivery Lifecycle.** Messages track `queued`, `delivered`, `acked`, and `failed` states (`delivery_state`).
+- **Interrupt Priority (`--interrupt`).** Urgent messages carry `priority=interrupt` (`⚡ INTERRUPT`) to signal immediate attention.
+- **Live Approval & Question Gates (`--interaction-type`).** Agents can post `approval` or `question` interaction cards (`--interaction-options`), and humans can resolve them inline from the dashboard or via `cli.py respond`.
+- **Peer Communication Rules (`comm_rules`).** Restrict which agents can message each other per project (`cli.py rules` or the `+ Rules` modal).
+- **Clean Voice-to-Text Dictation.** Deduplicated `SpeechRecognition` finalized segment handling so spoken phrases never repeat.
+
 ## What's new in v0.2
 
 - **Attachments.** Attach files, paste screenshots or dictate with the Mic button in the dashboard, or run `send --attach <file>`. Files are stored beside the Markdown copies and shown with the message.

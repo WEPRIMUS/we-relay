@@ -3,14 +3,14 @@
   "agents": [
     {
       "name": "deepseek",
-      "provider": "DeepSeek",
-      "base_url": "https://api.deepseek.com",
-      "model": "deepseek-flash",
-      "api_key_env": "DEEPSEEK_API_KEY",
+      "provider": "Experiential (DeepSeek)",
+      "base_url": "https://api.experientiallabs.ai/v1",
+      "model": "deepseek-v4.1-flash-uncensored",
+      "api_key_env": "EXPLABS_API_KEY",
       "system_prompt": "You are a helpful teammate. Answer what you are asked, clearly and briefly.",
       "projects": ["default"],
       "max_turns_per_thread": 6,
-      "docs": "https://api-docs.deepseek.com/quick_start/pricing"
+      "docs": "https://api.experientiallabs.ai/v1"
     },
     {
       "name": "qwen",
@@ -37,15 +37,14 @@
     },
     {
       "name": "glm",
-      "provider": "GLM (Z.ai)",
-      "base_url": "https://api.z.ai/api/paas/v4/",
-      "model": "glm-5.3",
-      "api_key_env": "ZAI_API_KEY",
+      "provider": "Experiential (GLM)",
+      "base_url": "https://api.experientiallabs.ai/v1",
+      "model": "glm-5.3-uncensored",
+      "api_key_env": "EXPLABS_API_KEY",
       "system_prompt": "You are a helpful teammate. Answer what you are asked, clearly and briefly.",
       "projects": ["default"],
       "max_turns_per_thread": 6,
-      "docs": "https://docs.z.ai/guides/develop/openai/python",
-      "note": "Zhipu's China platform uses https://open.bigmodel.cn/api/paas/v4/ (https://docs.bigmodel.cn/cn/guide/develop/openai/introduction) with a key from that platform."
+      "docs": "https://api.experientiallabs.ai/v1"
     },
     {
       "name": "minimax",

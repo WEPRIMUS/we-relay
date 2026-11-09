@@ -51,7 +51,11 @@ URL_FILE_NAME = ".relay-url"
 
 
 def relay_home() -> Path:
-    return Path(os.environ.get("RELAY_HOME") or Path.home() / ".we-relay").expanduser()
+    if os.environ.get("RELAY_HOME"):
+        return Path(os.environ["RELAY_HOME"]).expanduser()
+    if (BASE_DIR / "relay.db").exists() or (BASE_DIR / URL_FILE_NAME).exists():
+        return BASE_DIR
+    return Path.home() / ".we-relay"
 
 
 def default_db_path() -> Path:
@@ -68,6 +72,9 @@ DEFAULT_PROJECT = "default"
 DEFAULT_HUMANS = ("human",)
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 VALID_STATES = {"working", "waiting_for_review", "frozen", "blocked", "done", "idle"}
+VALID_DELIVERY_STATES = {"queued", "submitted", "delivered", "needs_attention"}
+VALID_INTERACTION_TYPES = {"", "approval", "question"}
+VALID_INTERACTION_STATUSES = {"", "pending", "approved", "denied", "answered"}
 
 DEFAULT_AGENT_ROLES = {
     "claude": "Claude Code",
@@ -159,6 +166,15 @@ class RelayState:
                         file_path TEXT NOT NULL,
                         attachments TEXT NOT NULL DEFAULT '[]',
                         is_private INTEGER NOT NULL DEFAULT 0,
+                        thread_id INTEGER,
+                        reply_to_id INTEGER,
+                        delivery_state TEXT NOT NULL DEFAULT 'queued',
+                        is_interrupt INTEGER NOT NULL DEFAULT 0,
+                        allow_peers TEXT NOT NULL DEFAULT '',
+                        comm_rules TEXT NOT NULL DEFAULT '',
+                        interaction_type TEXT NOT NULL DEFAULT '',
+                        interaction_status TEXT NOT NULL DEFAULT '',
+                        interaction_response TEXT NOT NULL DEFAULT '',
                         ack_by TEXT NOT NULL DEFAULT '[]',
                         created_at TEXT NOT NULL
                     );
@@ -199,6 +215,42 @@ class RelayState:
                 if "is_private" not in msg_cols:
                     conn.execute(
                         "ALTER TABLE messages ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0"
+                    )
+                if "thread_id" not in msg_cols:
+                    conn.execute(
+                        "ALTER TABLE messages ADD COLUMN thread_id INTEGER"
+                    )
+                if "reply_to_id" not in msg_cols:
+                    conn.execute(
+                        "ALTER TABLE messages ADD COLUMN reply_to_id INTEGER"
+                    )
+                if "delivery_state" not in msg_cols:
+                    conn.execute(
+                        "ALTER TABLE messages ADD COLUMN delivery_state TEXT NOT NULL DEFAULT 'queued'"
+                    )
+                if "is_interrupt" not in msg_cols:
+                    conn.execute(
+                        "ALTER TABLE messages ADD COLUMN is_interrupt INTEGER NOT NULL DEFAULT 0"
+                    )
+                if "allow_peers" not in msg_cols:
+                    conn.execute(
+                        "ALTER TABLE messages ADD COLUMN allow_peers TEXT NOT NULL DEFAULT ''"
+                    )
+                if "comm_rules" not in msg_cols:
+                    conn.execute(
+                        "ALTER TABLE messages ADD COLUMN comm_rules TEXT NOT NULL DEFAULT ''"
+                    )
+                if "interaction_type" not in msg_cols:
+                    conn.execute(
+                        "ALTER TABLE messages ADD COLUMN interaction_type TEXT NOT NULL DEFAULT ''"
+                    )
+                if "interaction_status" not in msg_cols:
+                    conn.execute(
+                        "ALTER TABLE messages ADD COLUMN interaction_status TEXT NOT NULL DEFAULT ''"
+                    )
+                if "interaction_response" not in msg_cols:
+                    conn.execute(
+                        "ALTER TABLE messages ADD COLUMN interaction_response TEXT NOT NULL DEFAULT ''"
                     )
 
                 # Ensure default projects exist
@@ -362,8 +414,25 @@ class RelayState:
         except Exception:
             attachments = []
         is_private = bool(row["is_private"]) if "is_private" in keys else False
+        raw_reply_to = row["reply_to_id"] if "reply_to_id" in keys else None
+        reply_to_id = int(raw_reply_to) if raw_reply_to is not None else None
+        raw_thread = row["thread_id"] if "thread_id" in keys else None
+        thread_id = int(raw_thread) if raw_thread is not None else int(row["id"])
         recipient = row["recipient"]
         cc = "" if (is_private or recipient == "all") else "all"
+        raw_dstate = (row["delivery_state"] if "delivery_state" in keys else "") or ""
+        delivery_state = raw_dstate if raw_dstate in VALID_DELIVERY_STATES else ("delivered" if ack_by else "queued")
+        is_interrupt = bool(row["is_interrupt"]) if "is_interrupt" in keys else False
+        raw_peers = (row["allow_peers"] if "allow_peers" in keys else "") or ""
+        allow_peers = [sanitize_slug(p, default="") for p in raw_peers.split(",") if sanitize_slug(p, default="")]
+        comm_rules = str(row["comm_rules"] if "comm_rules" in keys else "") or ""
+        interaction_type = str(row["interaction_type"] if "interaction_type" in keys else "") or ""
+        interaction_status = str(row["interaction_status"] if "interaction_status" in keys else "") or ""
+        raw_iresp = str(row["interaction_response"] if "interaction_response" in keys else "") or ""
+        try:
+            interaction_response = json.loads(raw_iresp) if raw_iresp.startswith("{") else raw_iresp
+        except Exception:
+            interaction_response = raw_iresp
         msg: Dict[str, Any] = {
             "id": row["id"],
             "msg_uuid": row["msg_uuid"],
@@ -372,6 +441,15 @@ class RelayState:
             "recipient": recipient,
             "cc": cc,
             "is_private": is_private,
+            "thread_id": thread_id,
+            "reply_to_id": reply_to_id,
+            "delivery_state": delivery_state,
+            "is_interrupt": is_interrupt,
+            "allow_peers": allow_peers,
+            "comm_rules": comm_rules,
+            "interaction_type": interaction_type,
+            "interaction_status": interaction_status,
+            "interaction_response": interaction_response,
             "subject": row["subject"],
             "body": row["body"],
             "file_path": row["file_path"],
@@ -424,15 +502,39 @@ class RelayState:
     def create_message(
         self,
         sender: str,
-        recipient: str,
-        subject: str,
+        recipient: str = "",
+        subject: str = "",
         body: Optional[str] = None,
         file_path: Optional[str] = None,
         project: str = DEFAULT_PROJECT,
         attachments: Optional[List[Dict[str, Any]]] = None,
-        is_private: bool = False,
+        is_private: Optional[bool] = False,
+        reply_to_id: Optional[int] = None,
+        is_interrupt: bool = False,
+        allow_peers: Optional[Any] = None,
+        comm_rules: str = "",
+        interaction_type: str = "",
     ) -> Dict[str, Any]:
-        if (project or "").strip().lower() in ("*", "all"):
+        parent_msg: Optional[Dict[str, Any]] = None
+        resolved_reply_to: Optional[int] = int(reply_to_id) if reply_to_id is not None else None
+        resolved_thread_id: Optional[int] = None
+
+        if resolved_reply_to is not None:
+            with self.db_lock:
+                conn = self._connect()
+                try:
+                    parent_row = conn.execute(
+                        "SELECT * FROM messages WHERE id = ?", (resolved_reply_to,)
+                    ).fetchone()
+                    if not parent_row:
+                        raise KeyError(f"Message id {resolved_reply_to} not found")
+                    parent_msg = self._row_to_message(parent_row)
+                finally:
+                    conn.close()
+            resolved_thread_id = int(parent_msg["thread_id"])
+            project = parent_msg["project"]
+
+        if resolved_reply_to is None and (project or "").strip().lower() in ("*", "all"):
             all_projs = [p["slug"] for p in self.list_projects() if p.get("slug") and p["slug"] != "all"]
             if not all_projs:
                 all_projs = [DEFAULT_PROJECT]
@@ -446,6 +548,10 @@ class RelayState:
                     project=p_slug,
                     attachments=attachments,
                     is_private=is_private,
+                    is_interrupt=is_interrupt,
+                    allow_peers=allow_peers,
+                    comm_rules=comm_rules,
+                    interaction_type=interaction_type,
                 )
                 for p_slug in all_projs
             ]
@@ -455,10 +561,28 @@ class RelayState:
             return first
 
         sender = sanitize_slug(sender, default="")
-        recipient = sanitize_slug(recipient, default="")
-        project = sanitize_slug(project, default=DEFAULT_PROJECT)
         if not sender:
             raise ValueError("sender is required")
+
+        if parent_msg is not None:
+            if not (recipient or "").strip():
+                recipient = (
+                    parent_msg["recipient"]
+                    if sender == parent_msg["sender"]
+                    else parent_msg["sender"]
+                )
+            if not (subject or "").strip():
+                p_subj = (parent_msg.get("subject") or "").strip()
+                subject = (
+                    p_subj
+                    if re.match(r"^\s*re\s*:", p_subj, re.IGNORECASE)
+                    else f"Re: {p_subj}"
+                )
+            if is_private is None:
+                is_private = bool(parent_msg.get("is_private", False))
+
+        recipient = sanitize_slug(recipient, default="")
+        project = sanitize_slug(project, default=DEFAULT_PROJECT)
         if not recipient:
             raise ValueError("recipient is required")
 
@@ -466,8 +590,21 @@ class RelayState:
         if not subject:
             raise ValueError("subject is required")
 
-        is_priv_int = 1 if (is_private and recipient != "all") else 0
+        is_priv_int = 1 if (bool(is_private) and recipient != "all") else 0
         cc_val = "" if (is_priv_int or recipient == "all") else "all"
+        is_int_val = 1 if bool(is_interrupt) else 0
+        if isinstance(allow_peers, list):
+            peers_list = [sanitize_slug(str(p), default="") for p in allow_peers if sanitize_slug(str(p), default="")]
+        elif isinstance(allow_peers, str):
+            peers_list = [sanitize_slug(p, default="") for p in allow_peers.split(",") if sanitize_slug(p, default="")]
+        else:
+            peers_list = []
+        allow_peers_str = ",".join(peers_list)
+        comm_rules_str = str(comm_rules or "").strip()
+        itype_str = str(interaction_type or "").strip().lower()
+        if itype_str not in VALID_INTERACTION_TYPES:
+            raise ValueError(f"Invalid interaction_type '{itype_str}'. Must be one of {sorted(VALID_INTERACTION_TYPES)}")
+        istatus_str = "pending" if itype_str in ("approval", "question") else ""
 
         normalized_attachments: List[Dict[str, Any]] = []
         for att in attachments or []:
@@ -533,12 +670,26 @@ class RelayState:
                 resolved_file_path = (mirror_dir / filename).resolve()
                 counter += 1
             cc_line = f"- **CC:** `{cc_val}`\n" if cc_val else ("- **Visibility:** `private`\n" if is_priv_int else "")
+            thread_line = (
+                f"- **Thread:** `#{resolved_thread_id}` (reply to `#{resolved_reply_to}`)\n"
+                if resolved_reply_to is not None
+                else ""
+            )
+            int_line = "- **Priority:** `INTERRUPT (urgent mid-turn)`\n" if is_int_val else ""
+            peers_line = f"- **Allowed Peers:** `{allow_peers_str}`\n" if allow_peers_str else ""
+            rules_line = f"- **Comm Rules:** {comm_rules_str}\n" if comm_rules_str else ""
+            interact_line = f"- **Interaction Required:** `{itype_str}` (`{istatus_str}`)\n" if itype_str else ""
             md_content = (
                 f"# {subject}\n\n"
                 f"- **Project:** `{project}`\n"
                 f"- **From:** `{sender}`\n"
                 f"- **To:** `{recipient}`\n"
                 f"{cc_line}"
+                f"{thread_line}"
+                f"{int_line}"
+                f"{peers_line}"
+                f"{rules_line}"
+                f"{interact_line}"
                 f"- **Timestamp (UTC):** `{now_iso}`\n"
                 f"- **UUID:** `{msg_uuid}`\n\n"
                 f"---\n\n"
@@ -551,8 +702,14 @@ class RelayState:
             try:
                 cur = conn.execute(
                     """
-                    INSERT INTO messages (msg_uuid, project, sender, recipient, subject, body, file_path, attachments, is_private, ack_by, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO messages (
+                        msg_uuid, project, sender, recipient, subject, body, file_path,
+                        attachments, is_private, thread_id, reply_to_id,
+                        delivery_state, is_interrupt, allow_peers, comm_rules,
+                        interaction_type, interaction_status, interaction_response,
+                        ack_by, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         msg_uuid,
@@ -564,11 +721,25 @@ class RelayState:
                         str(resolved_file_path),
                         json.dumps(normalized_attachments),
                         is_priv_int,
+                        resolved_thread_id,
+                        resolved_reply_to,
+                        "queued",
+                        is_int_val,
+                        allow_peers_str,
+                        comm_rules_str,
+                        itype_str,
+                        istatus_str,
+                        "",
                         "[]",
                         now_iso,
                     ),
                 )
                 msg_id = cur.lastrowid
+                if resolved_thread_id is None:
+                    conn.execute(
+                        "UPDATE messages SET thread_id = ? WHERE id = ?",
+                        (msg_id, msg_id),
+                    )
                 conn.commit()
                 row = conn.execute(
                     "SELECT * FROM messages WHERE id = ?", (msg_id,)
@@ -576,6 +747,17 @@ class RelayState:
                 msg = self._row_to_message(row)
             finally:
                 conn.close()
+
+        if (
+            resolved_reply_to is not None
+            and parent_msg is not None
+            and sender != parent_msg["sender"]
+            and sender not in (parent_msg.get("ack_by") or [])
+        ):
+            try:
+                self.ack_message(resolved_reply_to, sender)
+            except Exception:
+                pass
 
         with self.wait_cond:
             self.wait_cond.notify_all()
@@ -591,27 +773,56 @@ class RelayState:
         since_id: int = 0,
         limit: int = 200,
         project: Optional[str] = None,
+        thread_id: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         norm_agent = agent.strip().lower() if agent else None
         with self.db_lock:
             conn = self._connect()
             try:
-                # A first load (since_id 0) gets the NEWEST `limit` messages, still oldest-first;
-                # an incremental read (since_id > 0) continues forward from that id.
-                order = "DESC" if since_id <= 0 else "ASC"
-                if project and project.strip().lower() not in ("", "all"):
-                    proj_slug = sanitize_slug(project)
+                if thread_id is not None:
                     rows = conn.execute(
-                        f"SELECT * FROM messages WHERE id > ? AND project = ? ORDER BY id {order} LIMIT ?",
-                        (since_id, proj_slug, limit),
+                        "SELECT * FROM messages WHERE COALESCE(thread_id, id) = ? ORDER BY id ASC LIMIT ?",
+                        (int(thread_id), limit),
                     ).fetchall()
                 else:
-                    rows = conn.execute(
-                        f"SELECT * FROM messages WHERE id > ? ORDER BY id {order} LIMIT ?",
-                        (since_id, limit),
-                    ).fetchall()
-                if order == "DESC":
-                    rows = list(reversed(rows))
+                    # A first load (since_id 0) gets the NEWEST `limit` messages, still oldest-first;
+                    # an incremental read (since_id > 0) continues forward from that id.
+                    order = "DESC" if since_id <= 0 else "ASC"
+                    if project and project.strip().lower() not in ("", "all"):
+                        proj_slug = sanitize_slug(project)
+                        rows = conn.execute(
+                            f"SELECT * FROM messages WHERE id > ? AND project = ? ORDER BY id {order} LIMIT ?",
+                            (since_id, proj_slug, limit),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute(
+                            f"SELECT * FROM messages WHERE id > ? ORDER BY id {order} LIMIT ?",
+                            (since_id, limit),
+                        ).fetchall()
+                    if order == "DESC":
+                        rows = list(reversed(rows))
+
+                    # Ensure active threads always include their root message even if older than the limit window.
+                    if since_id <= 0 and not unread_only and rows:
+                        present_ids = {r["id"] for r in rows}
+                        missing_roots = sorted(
+                            {
+                                int(r["thread_id"])
+                                for r in rows
+                                if r["reply_to_id"] is not None
+                                and r["thread_id"] is not None
+                                and int(r["thread_id"]) not in present_ids
+                            }
+                        )
+                        if missing_roots:
+                            placeholders = ",".join("?" for _ in missing_roots)
+                            root_rows = conn.execute(
+                                f"SELECT * FROM messages WHERE id IN ({placeholders}) ORDER BY id ASC",
+                                tuple(missing_roots),
+                            ).fetchall()
+                            rows = list(root_rows) + list(rows)
+                            rows.sort(key=lambda r: r["id"])
+
                 messages = [self._row_to_message(r, viewer_agent=norm_agent) for r in rows]
             finally:
                 conn.close()
@@ -672,12 +883,20 @@ class RelayState:
             if not is_visible:
                 continue
             visible_unread.append(m)
-            # Wake only on messages addressed to the agent, to 'all', or sent by a person.
+            # Wake only on messages addressed to the agent, to 'all', sent by a person, or marked interrupt.
             # Unread FYI messages ride along in the same batch when woken.
-            if m["recipient"] == agent or m["recipient"] == "all" or m["sender"] in self.humans:
+            if (
+                m["recipient"] == agent
+                or m["recipient"] == "all"
+                or m["sender"] in self.humans
+                or m.get("is_interrupt")
+            ):
                 has_wake_trigger = True
 
-        return visible_unread if has_wake_trigger else []
+        if not has_wake_trigger:
+            return []
+        visible_unread.sort(key=lambda x: (0 if x.get("is_interrupt") else 1, x["id"]))
+        return visible_unread
 
     def ack_message(
         self, msg_id: int, agent: str, viewer_agent: Optional[str] = None
@@ -696,11 +915,15 @@ class RelayState:
                     raise KeyError(f"Message id {msg_id} not found")
                 msg = self._row_to_message(row)
                 ack_by = list(msg["ack_by"])
-                if agent not in ack_by:
-                    ack_by.append(agent)
+                new_dstate = msg.get("delivery_state") or "queued"
+                if new_dstate in ("queued", "submitted"):
+                    new_dstate = "delivered"
+                if agent not in ack_by or new_dstate != row["delivery_state"]:
+                    if agent not in ack_by:
+                        ack_by.append(agent)
                     conn.execute(
-                        "UPDATE messages SET ack_by = ? WHERE id = ?",
-                        (json.dumps(ack_by), msg_id),
+                        "UPDATE messages SET ack_by = ?, delivery_state = ? WHERE id = ?",
+                        (json.dumps(ack_by), new_dstate, msg_id),
                     )
                     conn.commit()
                 row = conn.execute(
@@ -712,6 +935,131 @@ class RelayState:
                 conn.close()
 
         self.broadcast_sse("message", sse_updated)
+        return updated
+
+    def update_delivery_state(
+        self, msg_id: int, delivery_state: str
+    ) -> Dict[str, Any]:
+        dstate = (delivery_state or "").strip().lower()
+        if dstate not in VALID_DELIVERY_STATES:
+            raise ValueError(
+                f"Invalid delivery_state '{dstate}'. Must be one of {sorted(VALID_DELIVERY_STATES)}"
+            )
+        with self.db_lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT * FROM messages WHERE id = ?", (msg_id,)
+                ).fetchone()
+                if not row:
+                    raise KeyError(f"Message id {msg_id} not found")
+                conn.execute(
+                    "UPDATE messages SET delivery_state = ? WHERE id = ?",
+                    (dstate, msg_id),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT * FROM messages WHERE id = ?", (msg_id,)
+                ).fetchone()
+                updated = self._row_to_message(row)
+            finally:
+                conn.close()
+        self.broadcast_sse("message", updated)
+        return updated
+
+    def resolve_interaction(
+        self,
+        msg_id: int,
+        action: str,
+        responder: str,
+        response_text: str = "",
+        create_reply: bool = True,
+    ) -> Dict[str, Any]:
+        responder = sanitize_slug(responder, default="")
+        if not responder:
+            raise ValueError("Valid responder name is required")
+        act = (action or "").strip().lower()
+        action_map = {
+            "approve": "approved",
+            "approved": "approved",
+            "deny": "denied",
+            "denied": "denied",
+            "answer": "answered",
+            "answered": "answered",
+        }
+        if act not in action_map:
+            raise ValueError(
+                "Invalid interaction action. Must be one of: approve, deny, answer"
+            )
+        resolved_status = action_map[act]
+        now_iso = utc_now_iso()
+        resp_obj = {
+            "by": responder,
+            "status": resolved_status,
+            "text": (response_text or "").strip(),
+            "at": now_iso,
+        }
+        with self.db_lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT * FROM messages WHERE id = ?", (msg_id,)
+                ).fetchone()
+                if not row:
+                    raise KeyError(f"Message id {msg_id} not found")
+                parent_msg = self._row_to_message(row)
+                ack_by = list(parent_msg["ack_by"])
+                if responder not in ack_by:
+                    ack_by.append(responder)
+                itype = parent_msg.get("interaction_type") or (
+                    "question" if resolved_status == "answered" else "approval"
+                )
+                conn.execute(
+                    """
+                    UPDATE messages
+                    SET interaction_type = ?,
+                        interaction_status = ?,
+                        interaction_response = ?,
+                        delivery_state = 'delivered',
+                        ack_by = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        itype,
+                        resolved_status,
+                        json.dumps(resp_obj),
+                        json.dumps(ack_by),
+                        msg_id,
+                    ),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT * FROM messages WHERE id = ?", (msg_id,)
+                ).fetchone()
+                updated = self._row_to_message(row)
+            finally:
+                conn.close()
+
+        self.broadcast_sse("message", updated)
+
+        if create_reply and responder != updated["sender"]:
+            badge = {
+                "approved": "✅ APPROVED",
+                "denied": "❌ DENIED",
+                "answered": "💬 ANSWERED",
+            }[resolved_status]
+            note = f"\n\n{resp_obj['text']}" if resp_obj["text"] else ""
+            reply_body = f"**{badge}** by `{responder}` on message `#{msg_id}`.{note}"
+            reply_msg = self.create_message(
+                sender=responder,
+                recipient=updated["sender"],
+                body=reply_body,
+                project=updated["project"],
+                reply_to_id=msg_id,
+                is_interrupt=True,
+            )
+            updated["reply_message"] = reply_msg
+
         return updated
 
     def update_status(
@@ -918,6 +1266,8 @@ class RelayState:
             "project": msg["project"],
             "sender": msg["sender"],
             "recipient": msg["recipient"],
+            "thread_id": msg["thread_id"],
+            "reply_to_id": msg["reply_to_id"],
             "subject": msg["subject"],
             "body": msg["body"],
             "file_path": msg["file_path"],
@@ -1097,12 +1447,15 @@ class RelayRequestHandler(http.server.BaseHTTPRequestHandler):
                 unread = qs.get("unread", ["false"])[0].lower() in ("1", "true", "yes")
                 since_id = int(qs.get("since_id", ["0"])[0] or "0")
                 limit = int(qs.get("limit", ["200"])[0] or "200")
+                raw_thread = qs.get("thread_id", [None])[0]
+                thread_id = int(raw_thread) if raw_thread else None
                 msgs = state.list_messages(
                     agent=agent,
                     unread_only=unread,
                     since_id=since_id,
                     limit=limit,
                     project=project,
+                    thread_id=thread_id,
                 )
                 self._send_json(200, {"messages": msgs})
                 return
@@ -1303,7 +1656,18 @@ class RelayRequestHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json(201, {"project": proj})
                 return
 
-            if path == "/v1/messages":
+            if path in ("/v1/messages", "/v1/reply") or re.match(r"^/v1/messages/\d+/reply$", path):
+                m_rep = re.match(r"^/v1/messages/(\d+)/reply$", path)
+                raw_reply_to = (
+                    m_rep.group(1)
+                    if m_rep
+                    else (
+                        data.get("reply_to_id")
+                        or data.get("parent_id")
+                        or (data.get("id") if path == "/v1/reply" else None)
+                    )
+                )
+                reply_to_id = int(raw_reply_to) if raw_reply_to is not None and str(raw_reply_to).strip() != "" else None
                 sender = data.get("sender") or data.get("from") or ""
                 recipient = data.get("recipient") or data.get("to") or ""
                 subject = data.get("subject") or ""
@@ -1311,7 +1675,15 @@ class RelayRequestHandler(http.server.BaseHTTPRequestHandler):
                 file_path = data.get("file_path") or data.get("file")
                 project = data.get("project") or DEFAULT_PROJECT
                 attachments = data.get("attachments") or []
-                is_private = bool(data.get("is_private") or data.get("private"))
+                is_private = (
+                    bool(data.get("is_private") or data.get("private"))
+                    if ("is_private" in data or "private" in data)
+                    else (None if reply_to_id is not None else False)
+                )
+                is_interrupt = bool(data.get("is_interrupt") or data.get("interrupt"))
+                allow_peers = data.get("allow_peers") or ""
+                comm_rules = str(data.get("comm_rules") or data.get("communication_rules") or "")
+                interaction_type = str(data.get("interaction_type") or "")
                 msg = state.create_message(
                     sender=sender,
                     recipient=recipient,
@@ -1321,8 +1693,44 @@ class RelayRequestHandler(http.server.BaseHTTPRequestHandler):
                     project=project,
                     attachments=attachments,
                     is_private=is_private,
+                    reply_to_id=reply_to_id,
+                    is_interrupt=is_interrupt,
+                    allow_peers=allow_peers,
+                    comm_rules=comm_rules,
+                    interaction_type=interaction_type,
                 )
                 self._send_json(201, {"message": msg})
+                return
+
+            if path == "/v1/delivery" or re.match(r"^/v1/messages/\d+/delivery$", path):
+                m_del = re.match(r"^/v1/messages/(\d+)/delivery$", path)
+                msg_id = int(m_del.group(1)) if m_del else int(data.get("id", 0))
+                dstate = str(data.get("delivery_state") or data.get("state") or "")
+                if not msg_id or not dstate:
+                    self._send_json(400, {"error": "Both 'id' and 'delivery_state' are required"})
+                    return
+                updated = state.update_delivery_state(msg_id=msg_id, delivery_state=dstate)
+                self._send_json(200, {"message": updated})
+                return
+
+            if path == "/v1/interact" or re.match(r"^/v1/messages/\d+/interact$", path):
+                m_int = re.match(r"^/v1/messages/(\d+)/interact$", path)
+                msg_id = int(m_int.group(1)) if m_int else int(data.get("id", 0))
+                action = str(data.get("action") or data.get("status") or "")
+                responder = str(data.get("responder") or data.get("by") or data.get("agent") or "human")
+                response_text = str(data.get("response") or data.get("text") or "")
+                create_reply = bool(data.get("create_reply", True))
+                if not msg_id or not action:
+                    self._send_json(400, {"error": "Both 'id' and 'action' (approve|deny|answer) are required"})
+                    return
+                updated = state.resolve_interaction(
+                    msg_id=msg_id,
+                    action=action,
+                    responder=responder,
+                    response_text=response_text,
+                    create_reply=create_reply,
+                )
+                self._send_json(200, {"message": updated})
                 return
 
             if path == "/v1/ack" or re.match(r"^/v1/messages/\d+/ack$", path):

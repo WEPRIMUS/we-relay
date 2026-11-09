@@ -117,7 +117,17 @@ def load_config(path: Optional[Any] = None) -> Dict[str, Any]:
 
 def key_for(agent: Dict[str, Any]) -> str:
     env = agent.get("api_key_env") or ""
-    return os.environ.get(env, "").strip() if env else ""
+    if not env:
+        return ""
+    val = os.environ.get(env, "").strip()
+    if not val and sys.platform == "win32":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as k:
+                val = str(winreg.QueryValueEx(k, env)[0] or "").strip()
+        except OSError:
+            pass
+    return val
 
 
 # ---- The model call ---------------------------------------------------------------------------
@@ -354,22 +364,36 @@ class AgentWorker:
             return
 
         pause = self.agent["cooldown_seconds"] - (time.monotonic() - self.last_reply)
-        if pause > 0 and self.stop.wait(pause):
+        if not m.get("is_interrupt") and pause > 0 and self.stop.wait(pause):
             return
-        self.status("working", f"Answering #{m['id']} from {m['sender']}.")
+        try:
+            self.post("/v1/delivery", {"id": m["id"], "delivery_state": "submitted"})
+        except Exception:
+            pass
+        self.status("working", f"Answering #{m['id']} from {m['sender']}{' [INTERRUPT]' if m.get('is_interrupt') else ''}.")
         system = SAFETY_PROMPT.format(name=self.me, project=self.project)
         if self.agent["system_prompt"]:
             system += "\n\n" + self.agent["system_prompt"]
+        if m.get("allow_peers"):
+            peers_str = ", ".join(m["allow_peers"]) if isinstance(m["allow_peers"], list) else str(m["allow_peers"])
+            system += f"\n\nAllowed peer collaborators for this task: {peers_str}."
+        if m.get("comm_rules"):
+            system += f"\nTask communication contract: {m['comm_rules']}"
         try:
             raw = chat(self.agent, [{"role": "system", "content": system}] + t["history"][-HISTORY_LIMIT:], self.key)
         except ModelError as e:
             self.log(f"[{self.me}] #{m['id']}: {e}")
+            try:
+                self.post("/v1/delivery", {"id": m["id"], "delivery_state": "needs_attention"})
+            except Exception:
+                pass
             self.status("blocked", f"Could not get an answer for #{m['id']}: {e}")
             return  # left unacknowledged, so a restart tries again
         reply = self._clean(visible(raw))
         subject = m["subject"] if re.match(r"\s*re\s*:", m["subject"], re.IGNORECASE) else f"Re: {m['subject']}"
         sent = self.post("/v1/messages", {
-            "project": self.project, "sender": self.me, "recipient": m["sender"], "subject": subject, "body": reply,
+            "project": self.project, "sender": self.me, "recipient": m["sender"],
+            "subject": subject, "body": reply, "reply_to_id": m["id"],
         })["message"]
         self.last_reply = time.monotonic()
         t["turns"] += 1

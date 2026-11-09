@@ -101,16 +101,37 @@ def format_message_markdown(m: Dict[str, Any]) -> str:
     delivery = m.get("delivery") or ""
     is_priv = bool(m.get("is_private", False))
     badges: List[str] = []
+    if m.get("is_interrupt"):
+        badges.append("[⚡INTERRUPT]")
     if delivery:
         badges.append(f"[{delivery}]")
     if is_priv:
         badges.append("[PRIVATE]")
+    dstate = m.get("delivery_state") or ""
+    if dstate:
+        badges.append(f"[{dstate.upper()}]")
+    itype = m.get("interaction_type") or ""
+    istatus = m.get("interaction_status") or ""
+    if itype:
+        badges.append(f"[{itype.upper()}:{istatus.upper() or 'PENDING'}]")
     badge_str = (" " + " ".join(badges)) if badges else ""
     lines = [
         f"================================================================================",
         f"[MESSAGE #{m['id']}] [{proj}] {m['sender'].upper()} -> {m['recipient'].upper()}{badge_str} | {m['created_at']}",
         f"Subject:   {m['subject']}",
     ]
+    if m.get("reply_to_id"):
+        lines.append(
+            f"Thread:    #{m.get('thread_id', m['id'])} (reply to #{m['reply_to_id']})"
+        )
+    if m.get("allow_peers"):
+        lines.append(f"Peers:     {', '.join(m['allow_peers'])}")
+    if m.get("comm_rules"):
+        lines.append(f"Rules:     {m['comm_rules']}")
+    if itype:
+        iresp = m.get("interaction_response")
+        resp_str = f" -> {json.dumps(iresp)}" if iresp else ""
+        lines.append(f"Interact:  {itype} ({istatus or 'pending'}){resp_str}")
     if delivery:
         lines.append(f"Delivery:  {delivery}" + (" (Private)" if is_priv else ""))
     elif is_priv:
@@ -132,6 +153,17 @@ def format_message_markdown(m: Dict[str, Any]) -> str:
 
 
 def cmd_send(args: argparse.Namespace) -> int:
+    reply_to: Optional[int] = getattr(args, "reply_to", None)
+    recipient = getattr(args, "to", None) or ""
+    subject = getattr(args, "subject", None) or ""
+    if reply_to is None:
+        if not recipient.strip():
+            print("Error: --to is required unless --reply-to is specified.", file=sys.stderr)
+            return 2
+        if not subject.strip():
+            print("Error: --subject is required unless --reply-to is specified.", file=sys.stderr)
+            return 2
+
     body = args.body
     file_path = args.file
     attach_files: List[str] = getattr(args, "attach", None) or []
@@ -165,25 +197,38 @@ def cmd_send(args: argparse.Namespace) -> int:
                 "filename": ap.name,
                 "content_type": ctype or "application/octet-stream",
                 "data_base64": b64,
-                "project": args.project,
+                "project": getattr(args, "project", DEFAULT_PROJECT),
                 "sender": args.sender,
             },
         )
         uploaded_attachments.append(up_res.get("attachment") or up_res)
 
     payload: Dict[str, Any] = {
-        "project": args.project,
+        "project": getattr(args, "project", DEFAULT_PROJECT),
         "sender": args.sender,
-        "recipient": args.to,
-        "subject": args.subject,
-        "is_private": bool(getattr(args, "private", False)),
+        "recipient": recipient,
+        "subject": subject,
     }
+    if reply_to is not None:
+        payload["reply_to_id"] = int(reply_to)
+        if getattr(args, "private", False):
+            payload["is_private"] = True
+    else:
+        payload["is_private"] = bool(getattr(args, "private", False))
     if body:
         payload["body"] = body
     if file_path:
         payload["file_path"] = file_path
     if uploaded_attachments:
         payload["attachments"] = uploaded_attachments
+    if getattr(args, "interrupt", False):
+        payload["is_interrupt"] = True
+    if getattr(args, "allow_peers", None):
+        payload["allow_peers"] = args.allow_peers
+    if getattr(args, "comm_rules", None):
+        payload["comm_rules"] = args.comm_rules
+    if getattr(args, "require_interaction", None):
+        payload["interaction_type"] = args.require_interaction
 
     res = http_json("POST", f"{args.url}/v1/messages", payload)
     msg = res["message"]
@@ -197,10 +242,15 @@ def cmd_send(args: argparse.Namespace) -> int:
             else ""
         )
         priv_tag = " [PRIVATE]" if msg.get("is_private") else ""
+        thread_tag = (
+            f" [thread #{msg.get('thread_id', msg['id'])} <- #{msg['reply_to_id']}]"
+            if msg.get("reply_to_id")
+            else ""
+        )
         bcast_projs = msg.get("broadcast_projects")
         proj_lbl = f"ALL ({', '.join(bcast_projs)})" if bcast_projs else msg["project"]
         print(
-            f"Sent message #{msg['id']} [{proj_lbl}]{priv_tag} ({msg['sender']} -> {msg['recipient']}): {msg['subject']}\n"
+            f"Sent message #{msg['id']} [{proj_lbl}]{priv_tag}{thread_tag} ({msg['sender']} -> {msg['recipient']}): {msg['subject']}\n"
             f"Mirrored file: {msg['file_path']}{att_line}"
         )
     return 0
@@ -212,6 +262,8 @@ def cmd_inbox(args: argparse.Namespace) -> int:
         params["unread"] = "true"
     if args.since_id:
         params["since_id"] = str(args.since_id)
+    if getattr(args, "thread", None):
+        params["thread_id"] = str(args.thread)
     qs = urllib.parse.urlencode(params)
     res = http_json("GET", f"{args.url}/v1/messages?{qs}")
     msgs = res.get("messages", [])
@@ -238,7 +290,38 @@ def cmd_ack(args: argparse.Namespace) -> int:
         print(json.dumps(msg, indent=2))
     else:
         print(
-            f"Acknowledged message #{msg['id']} as '{args.agent}' (ack_by={msg['ack_by']})."
+            f"Acknowledged message #{msg['id']} as '{args.agent}' (ack_by={msg['ack_by']}, delivery_state={msg.get('delivery_state')})."
+        )
+    return 0
+
+
+def cmd_delivery(args: argparse.Namespace) -> int:
+    payload = {"id": args.id, "delivery_state": args.state}
+    res = http_json("POST", f"{args.url}/v1/delivery", payload)
+    msg = res["message"]
+    if args.json:
+        print(json.dumps(msg, indent=2))
+    else:
+        print(
+            f"Updated delivery state for message #{msg['id']} -> {msg.get('delivery_state')}."
+        )
+    return 0
+
+
+def cmd_interact(args: argparse.Namespace) -> int:
+    payload = {
+        "id": args.id,
+        "action": args.action,
+        "responder": args.by,
+        "response": args.response or "",
+    }
+    res = http_json("POST", f"{args.url}/v1/interact", payload)
+    msg = res["message"]
+    if args.json:
+        print(json.dumps(msg, indent=2))
+    else:
+        print(
+            f"Interaction on message #{msg['id']} resolved as '{msg.get('interaction_status')}' by '{args.by}'."
         )
     return 0
 
@@ -431,8 +514,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Project slug or 'all' (default: {DEFAULT_PROJECT})",
     )
     p_send.add_argument("--from", dest="sender", required=True, help="Sender name, e.g. claude")
-    p_send.add_argument("--to", required=True, help="Recipient name, e.g. codex, or 'all'")
-    p_send.add_argument("--subject", required=True, help="Message subject line")
+    p_send.add_argument("--to", required=False, default="", help="Recipient name, e.g. codex, or 'all' (auto-filled when --reply-to is used)")
+    p_send.add_argument("--subject", required=False, default="", help="Message subject line (auto-filled when --reply-to is used)")
+    p_send.add_argument("--reply-to", dest="reply_to", type=int, help="Message ID to reply to in the same thread")
     p_send.add_argument("--file", help="Path to existing markdown handoff file")
     p_send.add_argument("--body", help="Markdown message body")
     p_send.add_argument(
@@ -446,7 +530,66 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Path to a file/screenshot/document to upload and attach (may be repeated)",
     )
+    p_send.add_argument(
+        "--interrupt",
+        action="store_true",
+        help="Mark message as an urgent mid-turn interrupt (prioritized ahead of normal queue)",
+    )
+    p_send.add_argument(
+        "--allow-peers",
+        dest="allow_peers",
+        default="",
+        help="Comma-separated peer agent names allowed for direct task coordination",
+    )
+    p_send.add_argument(
+        "--comm-rules",
+        dest="comm_rules",
+        default="",
+        help="Scoped communication contract/rules for the recipient on this task",
+    )
+    p_send.add_argument(
+        "--require-interaction",
+        dest="require_interaction",
+        choices=["approval", "question"],
+        help="Mark message as requiring approval (approve/deny) or an answer from the recipient/human",
+    )
     p_send.set_defaults(func=cmd_send)
+
+    # reply
+    p_reply = sub.add_parser(
+        "reply",
+        help="Reply directly in the same thread as an existing message (auto-fills project, recipient, subject, and ACKs the message)",
+    )
+    p_reply.add_argument("--id", dest="reply_to", type=int, required=True, help="Message ID to reply to")
+    p_reply.add_argument("--from", dest="sender", required=True, help="Sender name, e.g. claude")
+    p_reply.add_argument("--to", required=False, default="", help="Optional recipient override (defaults to the message sender)")
+    p_reply.add_argument("--subject", required=False, default="", help="Optional subject override (defaults to Re: <parent subject>)")
+    p_reply.add_argument("--project", default=DEFAULT_PROJECT, help="Project slug (auto-inherited from parent message)")
+    p_reply.add_argument("--file", help="Path to existing markdown handoff file")
+    p_reply.add_argument("--body", help="Markdown reply body")
+    p_reply.add_argument(
+        "--private",
+        action="store_true",
+        help="Mark reply private (otherwise inherits parent message's privacy)",
+    )
+    p_reply.add_argument(
+        "--attach",
+        action="append",
+        default=[],
+        help="Path to a file/screenshot/document to upload and attach (may be repeated)",
+    )
+    p_reply.add_argument(
+        "--interrupt",
+        action="store_true",
+        help="Mark reply as an urgent mid-turn interrupt",
+    )
+    p_reply.add_argument(
+        "--require-interaction",
+        dest="require_interaction",
+        choices=["approval", "question"],
+        help="Mark reply as requiring approval or an answer",
+    )
+    p_reply.set_defaults(func=cmd_send)
 
     # inbox
     p_inbox = sub.add_parser("inbox", help="View messages for an agent")
@@ -458,6 +601,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_inbox.add_argument("--agent", required=True, help="Agent name, e.g. claude, or 'all'")
     p_inbox.add_argument("--unread", action="store_true", help="Only show unacknowledged messages")
     p_inbox.add_argument("--since-id", type=int, default=0, help="Only messages with id > since_id")
+    p_inbox.add_argument("--thread", type=int, help="Only messages in thread #<id>")
     p_inbox.set_defaults(func=cmd_inbox)
 
     # ack
@@ -465,6 +609,30 @@ def build_parser() -> argparse.ArgumentParser:
     p_ack.add_argument("--agent", required=True, help="Agent acknowledging, e.g. claude")
     p_ack.add_argument("--id", type=int, required=True, help="Message ID to acknowledge")
     p_ack.set_defaults(func=cmd_ack)
+
+    # delivery
+    p_del = sub.add_parser("delivery", help="Update 4-state delivery status of a message")
+    p_del.add_argument("--id", type=int, required=True, help="Message ID")
+    p_del.add_argument(
+        "--state",
+        required=True,
+        choices=["queued", "submitted", "delivered", "needs_attention"],
+        help="Delivery state (queued|submitted|delivered|needs_attention)",
+    )
+    p_del.set_defaults(func=cmd_delivery)
+
+    # interact
+    p_int = sub.add_parser("interact", help="Approve, deny, or answer an interaction-required message")
+    p_int.add_argument("--id", type=int, required=True, help="Message ID")
+    p_int.add_argument(
+        "--action",
+        required=True,
+        choices=["approve", "deny", "answer"],
+        help="Action to take (approve|deny|answer)",
+    )
+    p_int.add_argument("--by", required=True, help="Agent or human resolving the interaction, e.g. human")
+    p_int.add_argument("--response", default="", help="Optional answer text or approval note")
+    p_int.set_defaults(func=cmd_interact)
 
     # wait
     p_wait = sub.add_parser(

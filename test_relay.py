@@ -1037,8 +1037,134 @@ class DashboardTests(LiveServerCase):
     def test_dashboard_serves_the_v02_controls(self):
         _, _, body = self.http("GET", "/")
         html = body.decode("utf-8")
-        for needle in ("attachFileInput", "micBtn", "privateCheckbox", "URLSearchParams(location.search)", "document.title"):
+        for needle in (
+            "attachFileInput", "micBtn", "privateCheckbox", "URLSearchParams(location.search)",
+            "document.title", "viewThreadsBtn", "sendInlineReply", "thread-replies", "openInlineReply",
+        ):
             self.assertIn(needle, html)
+
+
+class ThreadReplyTests(LiveServerCase):
+    def test_in_thread_replies_inherit_metadata_and_auto_ack_parent(self):
+        status, _, body = self.http("POST", "/v1/messages", {
+            "project": "demo", "sender": "human", "recipient": "cris",
+            "subject": "Bus conversational trend", "body": "Can we reply in the same thread?",
+        })
+        self.assertEqual(status, 201)
+        root = json.loads(body)["message"]
+        self.assertEqual(root["thread_id"], root["id"])
+        self.assertIsNone(root["reply_to_id"])
+
+        # Reply via /v1/reply without specifying project, recipient, or subject
+        status, _, body = self.http("POST", "/v1/reply", {
+            "reply_to_id": root["id"], "sender": "cris",
+            "body": "Yes! Replies stay in the same thread card.",
+        })
+        self.assertEqual(status, 201)
+        r1 = json.loads(body)["message"]
+        self.assertEqual(r1["thread_id"], root["id"])
+        self.assertEqual(r1["reply_to_id"], root["id"])
+        self.assertEqual(r1["project"], "demo")
+        self.assertEqual(r1["recipient"], "human")
+        self.assertEqual(r1["subject"], "Re: Bus conversational trend")
+
+        # Replying automatically acknowledged the parent message for cris
+        _, _, list_body = self.http("GET", "/v1/messages?project=demo")
+        msgs = json.loads(list_body)["messages"]
+        root_after = [m for m in msgs if m["id"] == root["id"]][0]
+        self.assertIn("cris", root_after["ack_by"])
+
+        # Second hop: human replies to cris's reply (r1); thread_id stays root["id"]
+        status, _, body = self.http("POST", f"/v1/messages/{r1['id']}/reply", {
+            "sender": "human", "body": "Perfect, much cleaner.",
+        })
+        self.assertEqual(status, 201)
+        r2 = json.loads(body)["message"]
+        self.assertEqual(r2["thread_id"], root["id"])
+        self.assertEqual(r2["reply_to_id"], r1["id"])
+        self.assertEqual(r2["recipient"], "cris")
+        self.assertEqual(r2["subject"], "Re: Bus conversational trend")
+
+        # Markdown mirror includes the Thread header
+        mirror_text = Path(r2["file_path"]).read_text(encoding="utf-8")
+        self.assertIn(f"**Thread:** `#{root['id']}` (reply to `#{r1['id']}`)", mirror_text)
+
+    def test_cli_reply_and_thread_filter(self):
+        sent = self.run_cli(
+            "send", "--project", "demo", "--from", "human", "--to", "cris",
+            "--subject", "Thread CLI test", "--body", "Initial root message",
+        )
+        self.assertEqual(sent.returncode, 0, sent.stderr)
+
+        rep = self.run_cli(
+            "reply", "--id", "1", "--from", "cris", "--body", "CLI reply inside thread #1",
+        )
+        self.assertEqual(rep.returncode, 0, rep.stderr)
+        self.assertIn("[thread #1 <- #1]", rep.stdout)
+
+        # Unrelated thread #3
+        self.run_cli(
+            "send", "--project", "demo", "--from", "human", "--to", "keel",
+            "--subject", "Separate topic", "--body", "Other thread",
+        )
+
+        thread_msgs = json.loads(
+            self.run_cli("--json", "inbox", "--project", "demo", "--agent", "cris", "--thread", "1").stdout
+        )
+        self.assertEqual([m["id"] for m in thread_msgs], [1, 2])
+        self.assertEqual([m["thread_id"] for m in thread_msgs], [1, 1])
+
+    def test_autoswarm_delivery_states_interrupt_peers_and_interactions(self):
+        # 1. Send normal message -> queued, then send interrupt message -> prioritized ahead in wait()
+        self.run_cli(
+            "send", "--project", "demo", "--from", "human", "--to", "cris",
+            "--subject", "Normal task", "--body", "Standard priority",
+        )
+        self.run_cli(
+            "send", "--project", "demo", "--from", "human", "--to", "cris",
+            "--subject", "Urgent task", "--body", "Pivot immediately",
+            "--interrupt", "--allow-peers", "keel, omni-c",
+            "--comm-rules", "Share API schema with keel; own backend.",
+            "--require-interaction", "approval",
+        )
+
+        # Check initial state in inbox before wait(--auto-ack) acknowledges it
+        inbox_before = json.loads(self.run_cli("--json", "inbox", "--project", "demo", "--agent", "cris", "--unread").stdout)
+        self.assertEqual([m["delivery_state"] for m in inbox_before], ["queued", "queued"])
+
+        woken = self.wait("cris")["messages"]
+        self.assertEqual([m["subject"] for m in woken], ["Urgent task", "Normal task"])
+        urgent = woken[0]
+        self.assertTrue(urgent["is_interrupt"])
+        self.assertEqual(urgent["delivery_state"], "delivered")  # self.wait uses --auto-ack
+        self.assertEqual(urgent["allow_peers"], ["keel", "omni-c"])
+        self.assertEqual(urgent["comm_rules"], "Share API schema with keel; own backend.")
+        self.assertEqual(urgent["interaction_type"], "approval")
+        self.assertEqual(urgent["interaction_status"], "pending")
+
+        # 2. Transition delivery_state to 'submitted' via CLI
+        r_del = self.run_cli("delivery", "--id", str(urgent["id"]), "--state", "submitted")
+        self.assertEqual(r_del.returncode, 0, r_del.stderr)
+        _, _, raw_msgs = self.http("GET", "/v1/messages?project=demo")
+        m_after = [m for m in json.loads(raw_msgs)["messages"] if m["id"] == urgent["id"]][0]
+        self.assertEqual(m_after["delivery_state"], "submitted")
+
+        # 3. Resolve interaction ('approve') via CLI -> marks 'approved', 'delivered', and posts in-thread reply
+        r_int = self.run_cli(
+            "interact", "--id", str(urgent["id"]), "--action", "approve",
+            "--by", "melo", "--response", "Approved to proceed with schema migration.",
+        )
+        self.assertEqual(r_int.returncode, 0, r_int.stderr)
+        _, _, raw_msgs2 = self.http("GET", f"/v1/messages?project=demo&thread_id={urgent['id']}")
+        thread_list = json.loads(raw_msgs2)["messages"]
+        self.assertEqual(len(thread_list), 2)
+        resolved_root, auto_reply = thread_list[0], thread_list[1]
+        self.assertEqual(resolved_root["interaction_status"], "approved")
+        self.assertEqual(resolved_root["delivery_state"], "delivered")
+        self.assertEqual(resolved_root["interaction_response"]["by"], "melo")
+        self.assertEqual(auto_reply["reply_to_id"], urgent["id"])
+        self.assertEqual(auto_reply["sender"], "melo")
+        self.assertIn("APPROVED", auto_reply["body"])
 
 
 if __name__ == "__main__":
