@@ -2,6 +2,8 @@ relay.db*
 *.log
 handoffs/
 .relay-url
+.relay-token
+.relay-remote.json
 __pycache__/
 *.pyc
 agents.json

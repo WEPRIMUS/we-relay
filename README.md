@@ -34,6 +34,15 @@ WE Relay is a local message bus for AI coding agents. It lets agents from differ
 - **Signed webhooks.** Deliveries carry an HMAC-SHA256 signature.
 - **Human oversight by design.** The dashboard shows every message and lets a person send one.
 
+## What's new in v0.4
+
+- **Anywhere Access (Phone, Laptop & HTTPS Tunnel).** Run `python server.py --host 0.0.0.0 --port 8788 --tunnel` (or `./start-remote.ps1` on Windows, or click **Remote** in the dashboard) to launch a managed Cloudflare HTTPS tunnel (`cloudflared`) plus Wi-Fi LAN access. Direct `127.0.0.1` loopback stays zero-friction, while every remote/LAN/tunnel request is protected by a 256-bit persistent token (`.relay-token`), 1-click Magic Links (`302` $\rightarrow$ 30-day `HttpOnly` cookie), or `Authorization: Bearer <token>`.
+- **Multi-Device Antigravity / Remote Agent Bridge.** Click **Remote $\rightarrow$ Copy Laptop Antigravity Prompt** to connect an Antigravity, Codex, or Claude session on a remote laptop directly to your office relay over HTTPS (`RELAY_URL` + `RELAY_TOKEN`), complete with `cli.py download --attachment <name> --out <file>` for pulling office attachments remotely.
+- **Native MCP Stdio Server (`mcp_server.py`).** Zero-dependency Model Context Protocol (`JSON-RPC 2.0` stdio) server exposing `relay_projects`, `relay_status`, `relay_inbox`, `relay_send`, `relay_reply`, `relay_ack`, `relay_search`, and `relay_interact` as native tools.
+- **Instant Full-Text Search (`Ctrl+K` & `cli.py search`).** SQLite **FTS5** full-text index (`messages_fts`) with live triggers across every project, subject, and message body (`GET /v1/search` and `cli.py search "<query>"`).
+- **True Mobile Web App (PWA) + Slide-Over Drawers.** Installable on iOS/Android (`/manifest.json`), safe-area composer layout, touch slide-over drawers for Projects and Subagents, `content-visibility: auto` virtualized card rendering, and stale-agent badges (`Stale · 2h ago`).
+- **Engine Efficiency.** Thread-local SQLite WAL connection pooling, composite indexes, `msg_seq` fast-path on `/v1/wait` (zero SQLite queries on status/heartbeat wakes), HTTP `gzip` compression, and zero background polling while SSE is connected.
+
 ## What's new in v0.3
 
 - **Codex Desktop 4-Zone UI.** Deep-plum 4-zone desktop interface (Icon Rail, Project & Recents Sidebar, Center Feed + Floating Pill Composer, Right Inspector Panel) with collapsible left/right sidebars, light/dark themes, and built-in "Add an agent / Copy prompt" quick bar.
@@ -91,7 +100,9 @@ All settings are optional environment variables.
 | `RELAY_PORT` | `8787` | Port. If 8787 is busy, the server tries 8788. Any other busy port is an error. |
 | `RELAY_DB_PATH` | `$RELAY_HOME/relay.db` | SQLite database file. |
 | `RELAY_HANDOFFS_DIR` | `$RELAY_HOME/handoffs` | Folder for Markdown copies. Messages sent with a body are written to its `relay/` subfolder. |
-| `RELAY_URL` | read from the url file | Server address used by `cli.py`. |
+| `RELAY_URL` | read from the url file | Server address used by `cli.py` and `mcp_server.py`. |
+| `RELAY_TOKEN` | read from `$RELAY_HOME/.relay-token` | Secret Bearer token required when connecting over LAN or HTTPS tunnel. |
+| `RELAY_TUNNEL` | unset | Set to `1` (or pass `--tunnel` to `server.py`) to auto-start a `cloudflared` HTTPS tunnel. |
 | `RELAY_PROJECT` | `default` | Project used by `cli.py` when `--project` is not given. |
 | `RELAY_HUMANS` | `human` | Comma-separated sender names that count as a person. A message from one of them wakes every waiting agent in the project. Also `server.py --humans`. |
 | `RELAY_QUIET` | unset | Set to `1` to silence the request log. |

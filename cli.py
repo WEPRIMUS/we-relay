@@ -8,6 +8,7 @@ update status, manage projects, and register webhooks.
 
 import argparse
 import base64
+import gzip
 import http.client
 import json
 import mimetypes
@@ -22,6 +23,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 URL_FILE_NAME = ".relay-url"
+TOKEN_FILE_NAME = ".relay-token"
+_ACTIVE_TOKEN: str = ""
 
 
 def _relay_home() -> Path:
@@ -47,20 +50,41 @@ def _default_project() -> str:
 
 def _resolve_default_url() -> str:
     if os.environ.get("RELAY_URL"):
-        return os.environ["RELAY_URL"]
+        return os.environ["RELAY_URL"].rstrip("/")
     url_file = _relay_home() / URL_FILE_NAME
     if url_file.exists():
         try:
             val = url_file.read_text(encoding="utf-8").strip()
             if val:
-                return val
+                return val.rstrip("/")
         except Exception:
             pass
     return "http://127.0.0.1:8787"
 
 
+def _resolve_default_token() -> str:
+    if os.environ.get("RELAY_TOKEN"):
+        return os.environ["RELAY_TOKEN"].strip()
+    tok_file = _relay_home() / TOKEN_FILE_NAME
+    if tok_file.exists():
+        try:
+            val = tok_file.read_text(encoding="utf-8").strip()
+            if val:
+                return val
+        except Exception:
+            pass
+    return ""
+
+
 DEFAULT_BASE_URL = _resolve_default_url()
 DEFAULT_PROJECT = _default_project()
+
+
+def _auth_headers(token: Optional[str] = None) -> Dict[str, str]:
+    resolved = token if token is not None else (_ACTIVE_TOKEN or _resolve_default_token())
+    if resolved:
+        return {"Authorization": f"Bearer {resolved}"}
+    return {}
 
 
 def http_json(
@@ -68,19 +92,33 @@ def http_json(
     url: str,
     payload: Optional[Dict[str, Any]] = None,
     timeout: float = 30.0,
+    token: Optional[str] = None,
 ) -> Dict[str, Any]:
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip",
+        **_auth_headers(token),
+    }
     if data is not None:
         headers["Content-Type"] = "application/json"
 
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8")
+            raw_bytes = resp.read()
+            if (resp.headers.get("Content-Encoding") or "").lower() == "gzip":
+                raw_bytes = gzip.decompress(raw_bytes)
+            raw = raw_bytes.decode("utf-8")
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="replace")
+        err_bytes = e.read()
+        if (e.headers.get("Content-Encoding") or "").lower() == "gzip":
+            try:
+                err_bytes = gzip.decompress(err_bytes)
+            except Exception:
+                pass
+        err_body = err_bytes.decode("utf-8", errors="replace")
         try:
             err_json = json.loads(err_body)
             msg = err_json.get("error", err_body)
@@ -139,7 +177,10 @@ def format_message_markdown(m: Dict[str, Any]) -> str:
     lines.append(f"File:      {m['file_path']}")
     atts = m.get("attachments") or []
     if atts:
-        att_paths = ", ".join(f"{a.get('filename', 'file')} ({a.get('path', '')})" for a in atts)
+        att_paths = ", ".join(
+            f"{a.get('filename', 'file')} (url={a.get('url', '')}, path={a.get('path', '')})"
+            for a in atts
+        )
         lines.append(f"Attached:  {att_paths}")
     lines.extend(
         [
@@ -489,6 +530,103 @@ def cmd_projects(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_search(args: argparse.Namespace) -> int:
+    params: Dict[str, str] = {
+        "q": args.query,
+        "limit": str(args.limit),
+    }
+    if args.project:
+        params["project"] = args.project
+    if args.agent:
+        params["agent"] = args.agent
+    qs = urllib.parse.urlencode(params)
+    res = http_json("GET", f"{args.url}/v1/search?{qs}")
+    msgs = res.get("messages", [])
+    if args.json:
+        print(json.dumps(msgs, indent=2))
+        return 0
+    if not msgs:
+        print(f"No messages matching '{args.query}'.")
+        return 0
+    for m in msgs:
+        print(format_message_markdown(m))
+        print()
+    return 0
+
+
+def cmd_download(args: argparse.Namespace) -> int:
+    att_ref = (args.attachment or "").strip()
+    if not att_ref:
+        print("Error: --attachment is required.", file=sys.stderr)
+        return 2
+    if att_ref.startswith("http://") or att_ref.startswith("https://"):
+        dl_url = att_ref
+    elif att_ref.startswith("/v1/attachments/"):
+        dl_url = f"{args.url.rstrip('/')}{att_ref}"
+    else:
+        dl_url = f"{args.url.rstrip('/')}/v1/attachments/{urllib.parse.quote(os.path.basename(att_ref))}"
+
+    headers = _auth_headers(getattr(args, "token", None))
+    req = urllib.request.Request(dl_url, method="GET", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=60.0) as resp:
+            raw_bytes = resp.read()
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {e.code}: {err_body}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Connection failed ({dl_url}): {e.reason}") from e
+
+    default_name = os.path.basename(urllib.parse.unquote(urllib.parse.urlparse(dl_url).path)) or "attachment.bin"
+    out_arg = getattr(args, "out", None)
+    if out_arg:
+        out_path = Path(out_arg)
+        if out_path.exists() and out_path.is_dir():
+            out_path = out_path / default_name
+    else:
+        out_path = Path.cwd() / default_name
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(raw_bytes)
+    if args.json:
+        print(json.dumps({"saved_to": str(out_path.resolve()), "size": len(raw_bytes)}))
+    else:
+        print(f"Downloaded {len(raw_bytes)} bytes -> {out_path.resolve()}")
+    return 0
+
+
+def cmd_remote(args: argparse.Namespace) -> int:
+    if args.start:
+        res = http_json("POST", f"{args.url}/v1/remote", {"action": "start"}, timeout=20.0)
+    elif args.stop:
+        res = http_json("POST", f"{args.url}/v1/remote", {"action": "stop"}, timeout=15.0)
+    elif args.rotate_token:
+        res = http_json("POST", f"{args.url}/v1/remote", {"action": "rotate_token"}, timeout=15.0)
+    else:
+        res = http_json("GET", f"{args.url}/v1/remote", timeout=15.0)
+
+    if args.json:
+        # Redact raw token unless --show-token is explicitly requested
+        out = dict(res)
+        if not getattr(args, "show_token", False):
+            out.pop("token", None)
+            out.pop("magic_url", None)
+            out.pop("lan_magic_urls", None)
+        print(json.dumps(out, indent=2))
+        return 0
+
+    print(f"WE Relay v{res.get('version', '0.4')}")
+    print(f"  Local URL:       {res.get('local_url')}")
+    print(f"  LAN URLs:        {', '.join(res.get('lan_urls') or []) or 'none'}")
+    print(f"  HTTPS Tunnel:    {res.get('tunnel_url') or ('stopped' if res.get('cloudflared_installed') else 'cloudflared not installed')}")
+    if res.get("tunnel_error"):
+        print(f"  Tunnel Note:     {res.get('tunnel_error')}")
+    print(f"  Token File:      {res.get('token_file')}")
+    if getattr(args, "show_token", False) and res.get("magic_url"):
+        print(f"  Magic Link:      {res.get('magic_url')}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="WE Relay CLI"
@@ -497,6 +635,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--url",
         default=DEFAULT_BASE_URL,
         help=f"Relay server URL (default: {DEFAULT_BASE_URL})",
+    )
+    parser.add_argument(
+        "--token",
+        default=None,
+        help="Remote relay token (default: $RELAY_TOKEN or $RELAY_HOME/.relay-token)",
     )
     parser.add_argument(
         "--json",
@@ -707,16 +850,41 @@ def build_parser() -> argparse.ArgumentParser:
     p_proj.add_argument("--description", help="Project description")
     p_proj.set_defaults(func=cmd_projects)
 
+    # search
+    p_search = sub.add_parser("search", help="Full-text search across relay messages (FTS5)")
+    p_search.add_argument("query", help="Search query or #message_id")
+    p_search.add_argument("--project", default="all", help="Project slug or 'all' (default: all)")
+    p_search.add_argument("--agent", default="all", help="Viewer agent for privacy filtering (default: all)")
+    p_search.add_argument("--limit", type=int, default=50, help="Max results (default: 50)")
+    p_search.set_defaults(func=cmd_search)
+
+    # download
+    p_dl = sub.add_parser("download", help="Download a relay attachment (works locally or over remote HTTPS)")
+    p_dl.add_argument("--attachment", required=True, help="Attachment filename, /v1/attachments/... path, or full URL")
+    p_dl.add_argument("--out", help="Destination file path or directory (default: current directory)")
+    p_dl.set_defaults(func=cmd_download)
+
+    # remote
+    p_rem = sub.add_parser("remote", help="Inspect or toggle remote HTTPS tunnel & LAN access")
+    p_rem.add_argument("--start", action="store_true", help="Start Cloudflare HTTPS tunnel")
+    p_rem.add_argument("--stop", action="store_true", help="Stop Cloudflare HTTPS tunnel")
+    p_rem.add_argument("--rotate-token", action="store_true", help="Rotate remote access token")
+    p_rem.add_argument("--show-token", action="store_true", help="Include magic URL with token in output")
+    p_rem.set_defaults(func=cmd_remote)
+
     return parser
 
 
 def main() -> int:
+    global _ACTIVE_TOKEN
     # Windows consoles default to a legacy code page; print messages as UTF-8 so em dashes etc. survive.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
     parser = build_parser()
     args = parser.parse_args()
+    if getattr(args, "token", None):
+        _ACTIVE_TOKEN = args.token.strip()
     try:
         return args.func(args)
     except Exception as e:

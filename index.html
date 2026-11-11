@@ -2,7 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#11101a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="manifest" href="/manifest.json" />
   <script>
     // Appearance before first paint; the page script reuses these two functions.
     // Theme = panels and text. Background = what sits behind them. Mood = how light the background is.
@@ -2098,6 +2102,8 @@
 
     .msg-card:hover {
       border-color: var(--hairline-strong);
+      content-visibility: auto;
+      contain-intrinsic-size: auto 150px;
     }
 
     .msg-header {
@@ -2849,45 +2855,305 @@
       color: var(--c-warn-ink);
     }
 
-    /* A narrow window (half screen, side panel): the columns stack and the page scrolls. */
-    @media (max-width: 1023px) {
-      .app-shell {
-        grid-template-columns: minmax(0, 1fr);
-        grid-template-rows: none;
-        grid-template-areas: "projects" "agents" "banner" "feed" "composer";
-      }
-      .agents-scroll { overflow: visible; }
-      .status-grid { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
-      .feed { height: 72vh; min-height: 360px; }
+    /* ---- v0.4 Modern Additions: Stale Presence, Command Palette (Ctrl+K), Remote Bridge & Mobile Drawers ---- */
+    .state-stale {
+      background: color-mix(in srgb, var(--c-warn) 16%, transparent);
+      color: var(--c-warn-ink);
+      border: 1px solid color-mix(in srgb, var(--c-warn) 42%, transparent);
     }
 
-    /* ---- Phones ---- */
-    @media (max-width: 600px) {
-      header { width: calc(100% - 24px); top: 12px; margin-top: 12px; padding: 10px 12px 10px 14px; border-radius: 18px; }
-      .onboarding-bar { width: 100%; }
-      .onboarding-bar span.lbl { flex-basis: 100%; }
-      .onboarding-bar input { flex: 1 1 0; width: auto; min-width: 0; }
-      .app-shell { padding: 18px 12px 48px; gap: 14px; }
-      .msg-card { padding: 14px 16px; }
+    .mobile-only-btn {
+      display: none;
+    }
 
-      .settings {
-        inset: 0;
-        margin: auto;
-        width: calc(100% - 24px);
-        height: fit-content;
-        max-height: calc(100% - 24px);
-        border-radius: 22px;
-        transform-origin: center;
+    .drawer-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 65;
+      background: rgba(5, 8, 16, 0.58);
+      -webkit-backdrop-filter: blur(3px);
+      backdrop-filter: blur(3px);
+    }
+
+    .banner-pill-action {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 28px;
+      padding: 0 10px;
+      border-radius: 999px;
+      border: 1px solid var(--hairline-strong);
+      background: var(--seg-track);
+      color: var(--text-secondary);
+      font-family: inherit;
+      font-size: 0.74rem;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
+    }
+    .banner-pill-action:hover {
+      background: var(--glass-hover);
+      color: var(--text-primary);
+      border-color: color-mix(in srgb, var(--accent-blue) 48%, var(--hairline-strong));
+    }
+    .banner-pill-action kbd {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      font-weight: 600;
+      padding: 1px 5px;
+      border-radius: 5px;
+      background: var(--glass-strong);
+      border: 1px solid var(--hairline);
+      color: var(--text-muted);
+    }
+    .remote-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--text-muted);
+      flex-shrink: 0;
+    }
+    .remote-dot.live {
+      background: var(--c-ok);
+      box-shadow: 0 0 8px var(--c-ok);
+    }
+
+    /* Command Palette & Remote Access Modals */
+    .cmd-dialog, .remote-dialog {
+      position: fixed;
+      inset: 9vh auto auto 0;
+      right: 0;
+      margin: 0 auto;
+      width: min(620px, calc(100% - 24px));
+      max-height: 80vh;
+      padding: 0;
+      border: 1px solid var(--hairline-strong);
+      border-radius: 20px;
+      background: var(--window-bg);
+      color: var(--text-primary);
+      box-shadow: var(--float-shadow);
+      overflow: hidden;
+    }
+    .remote-dialog {
+      width: min(580px, calc(100% - 24px));
+      max-height: 85vh;
+    }
+    .cmd-dialog[open], .remote-dialog[open] {
+      display: flex;
+      flex-direction: column;
+      animation: window-in 0.16s cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+    .cmd-dialog::backdrop, .remote-dialog::backdrop {
+      background: rgba(3, 6, 14, 0.52);
+      -webkit-backdrop-filter: blur(3px);
+      backdrop-filter: blur(3px);
+    }
+    .cmd-input-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--hairline);
+      background: var(--glass-strong);
+    }
+    .cmd-input-row input {
+      border: none;
+      background: transparent;
+      padding: 2px 0;
+      font-size: 0.94rem;
+      box-shadow: none !important;
+    }
+    .cmd-results {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      scrollbar-width: thin;
+    }
+    .cmd-group-label {
+      font-size: 0.68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      padding: 6px 10px 3px;
+    }
+    .cmd-item {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      width: 100%;
+      text-align: left;
+      padding: 8px 11px;
+      border-radius: 10px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--text-primary);
+      font-family: inherit;
+      cursor: pointer;
+      transition: background 0.1s ease;
+    }
+    .cmd-item:hover, .cmd-item.selected {
+      background: var(--glass-hover);
+      border-color: var(--hairline-strong);
+    }
+    .cmd-item-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 0.83rem;
+      font-weight: 600;
+    }
+    .cmd-item-sub {
+      font-size: 0.74rem;
+      color: var(--text-secondary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .cmd-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 14px;
+      border-top: 1px solid var(--hairline);
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      background: var(--glass-strong);
+    }
+
+    .remote-card {
+      background: var(--group-bg);
+      border: 1px solid var(--hairline-inner);
+      border-radius: 15px;
+      padding: 13px 15px;
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      margin-top: 12px;
+    }
+    .remote-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .remote-card-title {
+      font-size: 0.86rem;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .remote-url-box {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .remote-url-box input {
+      flex: 1 1 200px;
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      padding: 7px 10px;
+    }
+
+    /* ---- True Mobile & Tablet App Experience (Slide-Over Drawers + Safe Areas) ---- */
+    @media (max-width: 960px) {
+      body {
+        height: 100dvh;
+        overflow: hidden;
       }
-
-      .settings[open] { animation-name: dialog-in; }
-      .settings-head { padding: 14px 14px 12px 18px; }
-      .settings-body { padding: 2px 14px 18px; }
+      .codex-rail {
+        display: none !important;
+      }
+      .mobile-only-btn {
+        display: inline-flex !important;
+      }
+      .banner-invite-bar,
+      .banner-pill-action kbd,
+      .project-banner p {
+        display: none !important;
+      }
+      .app-shell,
+      .app-shell.inspector-collapsed {
+        display: grid !important;
+        grid-template-columns: minmax(0, 1fr) !important;
+        grid-template-rows: 50px minmax(0, 1fr) auto !important;
+        grid-template-areas:
+          "banner"
+          "feed"
+          "composer" !important;
+        height: 100dvh !important;
+        width: 100vw !important;
+        padding: 0 !important;
+        gap: 0 !important;
+      }
+      .project-banner {
+        height: 50px;
+        padding: 0 10px;
+        gap: 8px;
+      }
+      .sidebar {
+        position: fixed !important;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        width: min(290px, 84vw) !important;
+        height: 100dvh !important;
+        z-index: 70;
+        transform: translateX(-104%);
+        transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+        box-shadow: var(--float-shadow);
+      }
+      .agents-panel {
+        position: fixed !important;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        width: min(320px, 88vw) !important;
+        height: 100dvh !important;
+        padding: 10px !important;
+        z-index: 70;
+        display: flex !important;
+        transform: translateX(104%);
+        transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+        box-shadow: var(--float-shadow);
+      }
+      body.drawer-projects-open .sidebar {
+        transform: translateX(0);
+      }
+      body.drawer-agents-open .agents-panel {
+        transform: translateX(0);
+      }
+      body.drawer-projects-open .drawer-backdrop,
+      body.drawer-agents-open .drawer-backdrop {
+        display: block;
+      }
+      .feed {
+        height: auto !important;
+        min-height: 0 !important;
+        padding: 10px 12px 10px !important;
+      }
+      .composer-card {
+        padding: 8px 10px calc(10px + env(safe-area-inset-bottom, 0px)) !important;
+        border-radius: 14px 14px 0 0 !important;
+      }
+      .composer-card .section-title {
+        display: none;
+      }
     }
 
     /* Reduced motion: no drift, no pulse, the baton glow is static. */
     @media (prefers-reduced-motion: reduce) {
-      .sky::before, .pulse-dot, .settings[open] { animation: none; }
+      .sky::before, .pulse-dot, .settings[open], .cmd-dialog[open], .remote-dialog[open] { animation: none; }
       .msg-card.baton { animation: none; border-color: rgba(241, 194, 3, 0.6); box-shadow: 0 0 0 1px rgba(241, 194, 3, 0.3), 0 0 24px rgba(241, 194, 3, 0.22), var(--glass-shadow); }
       .msg-card.baton::after { display: none; }
     }
@@ -2923,14 +3189,22 @@
     </div>
   </header>
 
+  <div class="drawer-backdrop" id="drawerBackdrop" onclick="closeMobileDrawers()" aria-hidden="true"></div>
+
   <main class="app-shell">
     <!-- Far-left Codex Icon Rail -->
     <nav class="codex-rail" aria-label="Workspace navigation">
       <button type="button" class="rail-home" onclick="selectProject('all')" title="WE Relay — All Projects">
         <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3l8 7v10a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1V10l8-7z"/></svg>
       </button>
+      <button type="button" class="rail-btn" onclick="openSearchModal()" title="Search &amp; Command Palette (Ctrl+K)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
+      </button>
       <button type="button" class="rail-btn active" id="railThreadsBtn" onclick="setViewMode('threads')" title="Threads view">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      </button>
+      <button type="button" class="rail-btn" onclick="openRemoteModal()" title="Remote Access · Phone &amp; Laptop Antigravity Bridge">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2" width="12" height="20" rx="2"/><path d="M12 18h.01"/></svg>
       </button>
       <button type="button" class="rail-btn" onclick="reconnect()" title="5-Minute Watchdog &amp; SSE Stream">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
@@ -2968,9 +3242,17 @@
       </div>
 
       <div class="codex-quick-links">
-        <button type="button" class="codex-quick-btn" onclick="document.getElementById('subjectInput').focus()">
+        <button type="button" class="codex-quick-btn" onclick="closeMobileDrawers(); document.getElementById('subjectInput').focus()">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
           <span>New handoff</span>
+        </button>
+        <button type="button" class="codex-quick-btn" onclick="closeMobileDrawers(); openSearchModal()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
+          <span>Search history (Ctrl+K)</span>
+        </button>
+        <button type="button" class="codex-quick-btn" onclick="closeMobileDrawers(); openRemoteModal()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2" width="12" height="20" rx="2"/><path d="M12 18h.01"/></svg>
+          <span>Remote &amp; Laptop Bridge</span>
         </button>
         <div class="codex-invite-box" title="Type a new agent's name and copy its onboarding invitation prompt">
           <input type="text" id="sidebarInviteAgentName" placeholder="Invite agent, e.g. claude" aria-label="Invite agent name" oninput="document.getElementById('onboardAgentName').value = this.value" onkeydown="if(event.key==='Enter'){event.preventDefault();copyOnboardingPrompt(this.value);}" />
@@ -3011,6 +3293,9 @@
     <!-- Centre: Top slim project bar, message stream, and floating Codex pill composer -->
     <div class="project-banner">
       <div class="banner-text">
+        <button type="button" class="banner-icon-btn mobile-only-btn" onclick="toggleMobileDrawer('projects')" title="Open Projects &amp; Recents">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+        </button>
         <h2>
           <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-muted);width:15px;height:15px;"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
           <span id="activeProjectTitle">Default</span>
@@ -3019,6 +3304,15 @@
         <p id="activeProjectDesc">Default project.</p>
       </div>
       <div class="banner-right-actions">
+        <button type="button" class="banner-pill-action" onclick="openSearchModal()" title="Full-text search across all handoffs &amp; projects (Ctrl+K)">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
+          <span>Search</span>
+          <kbd>Ctrl+K</kbd>
+        </button>
+        <button type="button" class="banner-pill-action" id="bannerRemoteBtn" onclick="openRemoteModal()" title="Phone, Laptop &amp; Remote Antigravity Agent Access">
+          <span class="remote-dot" id="bannerRemoteDot" aria-hidden="true"></span>
+          <span>Remote</span>
+        </button>
         <div class="banner-invite-bar" title="Type an agent name and copy the onboarding invitation prompt for the active project">
           <span class="lbl">Add an agent</span>
           <input type="text" id="bannerOnboardAgentName" placeholder="Agent name, e.g. claude" aria-label="Agent name" oninput="document.getElementById('onboardAgentName').value = this.value; document.getElementById('sidebarInviteAgentName').value = this.value;" onkeydown="if(event.key==='Enter'){event.preventDefault();copyOnboardingPrompt(this.value);}" />
@@ -3032,7 +3326,7 @@
           <button type="button" class="filter-tab" id="viewFlatBtn" onclick="setViewMode('flat')" title="Show every message as a separate chronological card">Flat</button>
         </div>
         <span class="live-pill" id="livePill" data-state="connecting"><span class="dot" aria-hidden="true"></span><span id="livePillText">Connecting…</span></span>
-        <button type="button" class="banner-icon-btn" onclick="toggleInspector()" title="Toggle Right Inspector Panel">
+        <button type="button" class="banner-icon-btn" onclick="toggleInspector()" title="Toggle Right Inspector &amp; Subagents">
           <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/></svg>
         </button>
       </div>
@@ -3344,7 +3638,7 @@
           <div class="set-row about">
             <img id="aboutMark" alt="">
             <div>
-              <div class="about-name">WE Relay <span class="ver-chip">v0.1.0-dev</span></div>
+              <div class="about-name">WE Relay <span class="ver-chip">v0.4.0</span></div>
               <div class="set-hint">MIT licence · by WE PRIMUS</div>
             </div>
           </div>
@@ -3353,6 +3647,88 @@
     </div>
 
     <p class="settings-foot" id="storageNote" hidden>This browser is not saving settings, so they last until you close this tab.</p>
+  </dialog>
+
+  <!-- v0.4 Instant Full-Text Search & Command Palette (Ctrl+K / Cmd+K) -->
+  <dialog id="cmdDialog" class="cmd-dialog" aria-label="Search &amp; Command Palette" onclick="if(event.target===this) closeSearchModal()">
+    <div class="cmd-input-row">
+      <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;color:var(--text-muted);"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
+      <input type="text" id="cmdSearchInput" placeholder="Search all messages, #id, subjects, projects, or actions…" autocomplete="off" spellcheck="false" oninput="onSearchInput(this.value)" onkeydown="onSearchKeydown(event)" />
+      <button type="button" class="btn btn-sm" onclick="closeSearchModal()">Esc</button>
+    </div>
+    <div class="cmd-results" id="cmdResultsList"></div>
+    <div class="cmd-foot">
+      <span>SQLite FTS5 full-text search across entire relay history</span>
+      <span>↑↓ navigate · Enter open · Esc close</span>
+    </div>
+  </dialog>
+
+  <!-- v0.4 Remote Access (Phone / Laptop Browser) & Multi-Device Antigravity Agent Bridge -->
+  <dialog id="remoteDialog" class="remote-dialog" aria-labelledby="remoteTitle" onclick="if(event.target===this) closeRemoteModal()">
+    <div class="settings-head">
+      <h2 id="remoteTitle" style="font-size:1.12rem;display:flex;align-items:center;gap:8px;">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2" width="12" height="20" rx="2"/><path d="M12 18h.01"/></svg>
+        <span>Remote Access &amp; Laptop Agent Bridge</span>
+      </h2>
+      <button type="button" class="btn btn-sm btn-icon" onclick="closeRemoteModal()" aria-label="Close remote dialog">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="settings-body" style="padding-bottom:20px;">
+      <div class="remote-card">
+        <div class="remote-card-head">
+          <span class="remote-card-title">
+            <span class="remote-dot" id="remoteModalDot"></span>
+            <span id="remoteTunnelStateText">Checking tunnel…</span>
+          </span>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button type="button" class="btn btn-sm btn-primary" id="remoteToggleTunnelBtn" onclick="toggleRemoteTunnel()">Start HTTPS Tunnel</button>
+            <button type="button" class="btn btn-sm" onclick="fetchRemoteInfo(true)">Refresh</button>
+          </div>
+        </div>
+        <p class="set-hint" id="remoteTunnelHint">Access WE Relay securely from anywhere (home Wi-Fi, 5G cellphone, or laptop) over Cloudflare HTTPS. Protected by your 256-bit secret token; office loopback stays zero-friction.</p>
+        <div class="remote-url-box">
+          <input type="text" id="remotePublicUrlInput" readonly placeholder="Tunnel stopped — click Start HTTPS Tunnel" />
+          <button type="button" class="btn btn-sm btn-primary" onclick="copyRemoteMagicLink('tunnel')" title="Copies the 1-click Magic Link that signs in your phone or laptop browser for 30 days">Copy Magic Link</button>
+        </div>
+      </div>
+
+      <div class="remote-card">
+        <div class="remote-card-head">
+          <span class="remote-card-title">🏠 Same Wi-Fi / LAN Access</span>
+          <button type="button" class="btn btn-sm" onclick="copyRemoteMagicLink('lan')">Copy LAN Magic Link</button>
+        </div>
+        <div class="remote-url-box">
+          <input type="text" id="remoteLanUrlInput" readonly placeholder="http://192.168.x.x:8788" />
+        </div>
+      </div>
+
+      <div class="remote-card">
+        <div class="remote-card-head">
+          <span class="remote-card-title">💻 Laptop Antigravity / Remote Agent Bridge</span>
+        </div>
+        <p class="set-hint">Paste one prompt into an Antigravity, Codex, or Claude session on your laptop so it connects directly to this office relay over HTTPS, reads handoffs, downloads attachments, and executes work on your laptop.</p>
+        <div class="remote-url-box">
+          <input type="text" id="remoteAgentNameInput" value="laptop" placeholder="Remote agent name, e.g. laptop" style="max-width:170px;" />
+          <button type="button" class="btn btn-sm btn-primary" onclick="copyLaptopAgentPrompt()">Copy Laptop Antigravity Prompt</button>
+        </div>
+      </div>
+
+      <div class="remote-card">
+        <div class="remote-card-head">
+          <span class="remote-card-title">🔑 Access Token Security</span>
+          <div style="display:flex;gap:6px;">
+            <button type="button" class="btn btn-sm" onclick="toggleTokenReveal()" id="revealTokenBtn">Show</button>
+            <button type="button" class="btn btn-sm" onclick="copyRawToken()">Copy Token</button>
+            <button type="button" class="btn btn-sm" style="border-color:var(--c-warn);color:var(--c-warn-ink);" onclick="rotateRemoteToken()">Rotate Token</button>
+          </div>
+        </div>
+        <div class="remote-url-box">
+          <input type="password" id="remoteTokenInput" readonly value="" />
+        </div>
+        <p class="set-hint" id="remoteTokenPathHint">Stored locally on disk in <code>.relay-token</code> (gitignored).</p>
+      </div>
+    </div>
   </dialog>
 
   <script>
@@ -3746,6 +4122,23 @@
         : d.toLocaleString([], { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
     }
 
+    function fmtRelative(iso) {
+      const d = new Date(iso);
+      if (isNaN(d)) return fmtTime(iso);
+      const sec = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+      if (sec < 45) return 'just now';
+      if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+      if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+      return `${Math.floor(sec / 86400)}d ago`;
+    }
+
+    function isStaleStatus(st) {
+      if (!st || !['working', 'waiting_for_review'].includes(st.state)) return false;
+      const d = new Date(st.updated_at);
+      if (isNaN(d)) return false;
+      return (Date.now() - d.getTime()) > 30 * 60 * 1000;
+    }
+
     function escapeHtml(str) {
       return String(str || '')
         .replace(/&/g, '&amp;')
@@ -3852,6 +4245,7 @@
     }
 
     function selectProject(slug) {
+      closeMobileDrawers();
       activeProject = slug;
       openDecided = true;
       history.replaceState(null, '', `?project=${encodeURIComponent(slug)}`);
@@ -3886,7 +4280,10 @@
       const composeSelect = document.getElementById('composeProjectSelect');
       const currentComposeVal = composeSelect.value || 'default';
 
-      const totalMsgs = allMessages.length;
+      const totalMsgs = Math.max(
+        allMessages.length,
+        allProjects.reduce((sum, p) => sum + Math.max(Number(p.message_count || 0), allMessages.filter(m => m.project === p.slug).length), 0)
+      );
       const totalAgents = allStatuses.length;
 
       let html = `
@@ -3901,8 +4298,8 @@
 
       for (const p of allProjects) {
         const isAct = activeProject === p.slug;
-        const mCount = allMessages.filter(m => m.project === p.slug).length;
-        const aCount = allStatuses.filter(s => s.project === p.slug).length;
+        const mCount = Math.max(Number(p.message_count || 0), allMessages.filter(m => m.project === p.slug).length);
+        const aCount = Math.max(Number(p.agent_count || 0), allStatuses.filter(s => s.project === p.slug).length);
         html += `
           <a href="?project=${encodeURIComponent(p.slug)}" class="project-item ${isAct ? 'active' : ''}" onclick="return projectClick(event, '${escapeHtml(p.slug)}')" title="Ctrl+click or right-click to open this project in its own window">
             <div class="project-item-top">
@@ -3945,6 +4342,7 @@
     }
 
     function jumpToMessage(msgId, projSlug) {
+      closeMobileDrawers();
       if (projSlug && activeProject !== 'all' && activeProject !== projSlug) {
         selectProject(projSlug);
       }
@@ -3958,7 +4356,25 @@
       }, 60);
     }
 
+    function toggleMobileDrawer(which) {
+      if (which === 'projects') {
+        document.body.classList.remove('drawer-agents-open');
+        document.body.classList.toggle('drawer-projects-open');
+      } else if (which === 'agents') {
+        document.body.classList.remove('drawer-projects-open');
+        document.body.classList.toggle('drawer-agents-open');
+      }
+    }
+
+    function closeMobileDrawers() {
+      document.body.classList.remove('drawer-projects-open', 'drawer-agents-open');
+    }
+
     function toggleInspector() {
+      if (window.matchMedia('(max-width: 960px)').matches) {
+        toggleMobileDrawer('agents');
+        return;
+      }
       const panel = document.getElementById('agentsPanel');
       const shell = document.querySelector('.app-shell');
       if (!panel || !shell) return;
@@ -4108,8 +4524,10 @@
         const key = `${st.project}/${st.agent}`;
         const open = openAgents.has(key);
         const title = st.agent.charAt(0).toUpperCase() + st.agent.slice(1);
+        const stale = isStaleStatus(st);
+        const relTime = fmtRelative(st.updated_at);
         // Hover shows the branch and commit; a click opens the card.
-        const tip = [st.branch && `Branch ${st.branch}`, st.commit_sha && `commit ${st.commit_sha}`].filter(Boolean).join(', ');
+        const tip = [st.branch && `Branch ${st.branch}`, st.commit_sha && `commit ${st.commit_sha}`, `Updated ${fmtTime(st.updated_at)}`].filter(Boolean).join(', ');
         return `
           <div class="agent-card agent-${escapeHtml(st.agent)}${open ? ' open' : ''}" data-key="${escapeHtml(key)}" data-agent="${escapeHtml(st.agent)}" title="${escapeHtml(tip)}">
             <button type="button" class="agent-sum" aria-expanded="${open}" onclick="toggleAgent(this)">
@@ -4119,6 +4537,7 @@
                   ${activeProject === 'all' ? `<span class="project-slug-badge">${escapeHtml(st.project)}</span>` : ''}
                 </span>
                 <span class="agent-title">
+                  ${stale ? `<span class="state-badge state-stale" title="Last status update was ${escapeHtml(relTime)}">Stale · ${escapeHtml(relTime)}</span>` : ''}
                   <span class="state-badge state-${escapeHtml(st.state)}">${escapeHtml(stateLabel(st.state))}</span>
                   ${CHEVRON}
                 </span>
@@ -4132,7 +4551,7 @@
                 <div class="git-pill"><span class="k">commit:</span>${escapeHtml(st.commit_sha)}</div>
               </div>` : ''}
               <div class="card-footer">
-                <span title="${escapeHtml(st.updated_at)}">Updated ${escapeHtml(fmtTime(st.updated_at))}</span>
+                <span title="${escapeHtml(st.updated_at)}">Updated ${escapeHtml(relTime)} (${escapeHtml(fmtTime(st.updated_at))})</span>
                 <button class="btn btn-sm" onclick="copyOnboardingPrompt(this.closest('.agent-card').dataset.agent)"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg> Copy prompt</button>
               </div>
             </div>
@@ -5285,6 +5704,12 @@
         noteUpdate();
       });
 
+      es.addEventListener('remote', (e) => {
+        try {
+          applyRemoteInfo(JSON.parse(e.data));
+        } catch {}
+      });
+
       es.onerror = () => {
         setStream(es.readyState === EventSource.CLOSED ? 'down' : 'reconnecting');
       };
@@ -5293,6 +5718,326 @@
     function reconnect() {
       connectSSE();
       fetchSnapshot();
+      fetchRemoteInfo();
+    }
+
+    // ---- v0.4 Instant Command Palette & Full-Text Search (Ctrl+K / Cmd+K) ----
+    let cmdItems = [];
+    let cmdSelectedIdx = 0;
+    let cmdSearchTimer = null;
+
+    function openSearchModal() {
+      const dlg = document.getElementById('cmdDialog');
+      if (!dlg) return;
+      if (!dlg.open) dlg.showModal();
+      const inp = document.getElementById('cmdSearchInput');
+      if (inp) {
+        inp.focus();
+        inp.select();
+        runPaletteSearch(inp.value || '');
+      }
+    }
+
+    function closeSearchModal() {
+      const dlg = document.getElementById('cmdDialog');
+      if (dlg && dlg.open) dlg.close();
+    }
+
+    function onSearchInput(val) {
+      if (cmdSearchTimer) clearTimeout(cmdSearchTimer);
+      cmdSearchTimer = setTimeout(() => runPaletteSearch(val), 140);
+    }
+
+    async function runPaletteSearch(rawQuery) {
+      const q = String(rawQuery || '').trim();
+      const items = [];
+
+      // Quick Actions matching query
+      const actions = [
+        { title: '📱 Remote Access & Laptop Antigravity Bridge', sub: 'Open HTTPS tunnel, phone Magic Link & laptop agent prompt', run: () => { closeSearchModal(); openRemoteModal(); } },
+        { title: '✍️ Write New Handoff', sub: 'Focus the handoff composer in the current project', run: () => { closeSearchModal(); document.getElementById('subjectInput')?.focus(); } },
+        { title: '🔀 Toggle Threads / Flat View', sub: `Currently in ${viewMode} mode`, run: () => { closeSearchModal(); setViewMode(viewMode === 'threads' ? 'flat' : 'threads'); } },
+        { title: '⚙️ Open Relay Settings', sub: 'Theme, notifications, sound, and API agents', run: () => { closeSearchModal(); openSettings(); } }
+      ];
+      actions.forEach(a => {
+        if (!q || a.title.toLowerCase().includes(q.toLowerCase()) || a.sub.toLowerCase().includes(q.toLowerCase())) {
+          items.push({ group: 'Quick Actions', ...a });
+        }
+      });
+
+      // Matching Projects
+      allProjects.forEach(p => {
+        if (!q || p.slug.toLowerCase().includes(q.toLowerCase()) || (p.name || '').toLowerCase().includes(q.toLowerCase())) {
+          items.push({
+            group: 'Projects',
+            title: `📁 ${p.name} (${p.slug})`,
+            sub: p.description || `Switch to project ${p.slug}`,
+            run: () => { closeSearchModal(); selectProject(p.slug); }
+          });
+        }
+      });
+
+      // Full-Text SQLite FTS5 Search across all history
+      if (q.length > 0) {
+        try {
+          const res = await fetch(`/v1/search?q=${encodeURIComponent(q)}&limit=30`);
+          if (res.ok) {
+            const data = await res.json();
+            (data.messages || []).forEach(m => {
+              const snippet = String(m.body || '').replace(/\s+/g, ' ').slice(0, 140);
+              items.push({
+                group: `Messages (${data.count || 0})`,
+                title: `#${m.id} · ${m.subject || '(no subject)'}`,
+                sub: `[${m.project}] ${m.sender} → ${m.recipient} · ${fmtRelative(m.created_at)} — ${snippet}`,
+                run: () => jumpToSearchResult(m)
+              });
+            });
+          }
+        } catch (err) {
+          console.warn('Search failed:', err);
+        }
+      } else {
+        allMessages.slice(-8).reverse().forEach(m => {
+          const snippet = String(m.body || '').replace(/\s+/g, ' ').slice(0, 120);
+          items.push({
+            group: 'Recent Handoffs',
+            title: `#${m.id} · ${m.subject || '(no subject)'}`,
+            sub: `[${m.project}] ${m.sender} → ${m.recipient} · ${fmtRelative(m.created_at)} — ${snippet}`,
+            run: () => jumpToSearchResult(m)
+          });
+        });
+      }
+
+      cmdItems = items;
+      cmdSelectedIdx = 0;
+      renderCmdResults();
+    }
+
+    function renderCmdResults() {
+      const listEl = document.getElementById('cmdResultsList');
+      if (!listEl) return;
+      if (!cmdItems.length) {
+        listEl.innerHTML = `<div class="empty-state" style="padding:20px;">No matching messages, projects, or commands.</div>`;
+        return;
+      }
+      let currentGroup = '';
+      let html = '';
+      cmdItems.forEach((it, idx) => {
+        if (it.group !== currentGroup) {
+          currentGroup = it.group;
+          html += `<div class="cmd-group-label">${escapeHtml(currentGroup)}</div>`;
+        }
+        html += `
+          <button type="button" class="cmd-item ${idx === cmdSelectedIdx ? 'selected' : ''}" data-idx="${idx}" onclick="execCmdItem(${idx})">
+            <div class="cmd-item-top"><span>${escapeHtml(it.title)}</span></div>
+            <div class="cmd-item-sub">${escapeHtml(it.sub || '')}</div>
+          </button>
+        `;
+      });
+      listEl.innerHTML = html;
+      const selEl = listEl.querySelector('.cmd-item.selected');
+      if (selEl) selEl.scrollIntoView({ block: 'nearest' });
+    }
+
+    function execCmdItem(idx) {
+      const item = cmdItems[idx];
+      if (item && typeof item.run === 'function') item.run();
+    }
+
+    function onSearchKeydown(e) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (cmdItems.length) { cmdSelectedIdx = (cmdSelectedIdx + 1) % cmdItems.length; renderCmdResults(); }
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (cmdItems.length) { cmdSelectedIdx = (cmdSelectedIdx - 1 + cmdItems.length) % cmdItems.length; renderCmdResults(); }
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        execCmdItem(cmdSelectedIdx);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        closeSearchModal();
+      }
+    }
+
+    function jumpToSearchResult(msg) {
+      closeSearchModal();
+      if (!msg || !msg.id) return;
+      if (!allMessages.some(x => x.id === msg.id)) {
+        allMessages.push(msg);
+        allMessages.sort((a, b) => a.id - b.id);
+      }
+      expandedIds.add(msg.id);
+      if (msg.project && activeProject !== 'all' && activeProject !== msg.project) {
+        selectProject(msg.project);
+      } else {
+        renderMessages();
+      }
+      jumpToMessage(msg.id, msg.project);
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        const dlg = document.getElementById('cmdDialog');
+        if (dlg && dlg.open) closeSearchModal();
+        else openSearchModal();
+      }
+    });
+
+    // ---- v0.4 Remote Access & Multi-Device Antigravity Bridge ----
+    let remoteInfo = null;
+
+    function applyRemoteInfo(data) {
+      if (!data || typeof data !== 'object') return;
+      remoteInfo = data;
+      const running = Boolean(data.tunnel_running && data.tunnel_url);
+      const bannerDot = document.getElementById('bannerRemoteDot');
+      if (bannerDot) bannerDot.classList.toggle('live', running);
+      const modalDot = document.getElementById('remoteModalDot');
+      if (modalDot) modalDot.classList.toggle('live', running);
+
+      const stateTxt = document.getElementById('remoteTunnelStateText');
+      if (stateTxt) {
+        stateTxt.textContent = running
+          ? 'HTTPS Tunnel Live (Anywhere Access Active)'
+          : (data.cloudflared_available ? 'HTTPS Tunnel Stopped (Ready)' : 'cloudflared not found (LAN mode ready)');
+      }
+      const toggleBtn = document.getElementById('remoteToggleTunnelBtn');
+      if (toggleBtn) {
+        toggleBtn.textContent = running ? 'Stop Tunnel' : 'Start HTTPS Tunnel';
+        toggleBtn.disabled = !data.cloudflared_available && !running;
+      }
+      const pubIn = document.getElementById('remotePublicUrlInput');
+      if (pubIn) {
+        pubIn.value = data.tunnel_url || (data.tunnel_error ? `Error: ${data.tunnel_error}` : '');
+      }
+      const lanIn = document.getElementById('remoteLanUrlInput');
+      if (lanIn) {
+        lanIn.value = data.lan_url || window.location.origin;
+      }
+      const tokIn = document.getElementById('remoteTokenInput');
+      if (tokIn && data.token) {
+        tokIn.value = data.token;
+      }
+      const pathHint = document.getElementById('remoteTokenPathHint');
+      if (pathHint && data.token_file) {
+        pathHint.innerHTML = `Token file on office machine: <code>${escapeHtml(data.token_file)}</code> (gitignored).`;
+      }
+    }
+
+    async function fetchRemoteInfo(toastOnDone = false) {
+      try {
+        const res = await fetch('/v1/remote');
+        if (res.ok) {
+          const data = await res.json();
+          applyRemoteInfo(data);
+          if (toastOnDone) showToast('Remote access status refreshed.');
+        }
+      } catch (e) {
+        console.warn('Remote info fetch error:', e);
+      }
+    }
+
+    function openRemoteModal() {
+      const dlg = document.getElementById('remoteDialog');
+      if (!dlg) return;
+      if (!dlg.open) dlg.showModal();
+      fetchRemoteInfo();
+    }
+
+    function closeRemoteModal() {
+      const dlg = document.getElementById('remoteDialog');
+      if (dlg && dlg.open) dlg.close();
+    }
+
+    async function toggleRemoteTunnel() {
+      const running = Boolean(remoteInfo && remoteInfo.tunnel_running);
+      const action = running ? 'stop' : 'start';
+      const btn = document.getElementById('remoteToggleTunnelBtn');
+      if (btn) { btn.disabled = true; btn.textContent = running ? 'Stopping…' : 'Starting HTTPS Tunnel…'; }
+      try {
+        const res = await fetch('/v1/remote', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action })
+        });
+        const data = await res.json();
+        applyRemoteInfo(data);
+        showToast(data.tunnel_running ? 'Cloudflare HTTPS tunnel is live!' : 'HTTPS tunnel stopped.');
+      } catch (e) {
+        showToast(`Tunnel action failed: ${e.message}`);
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    function copyRemoteMagicLink(kind) {
+      if (!remoteInfo) { showToast('Loading remote info…'); return; }
+      const link = kind === 'lan' ? remoteInfo.lan_magic_url : (remoteInfo.magic_url || remoteInfo.lan_magic_url);
+      if (!link) {
+        showToast('Start the HTTPS tunnel first to generate a public Magic Link.');
+        return;
+      }
+      navigator.clipboard.writeText(link).then(() => {
+        showToast(`${kind === 'lan' ? 'LAN' : 'HTTPS'} Magic Link copied! Open it on your phone or laptop browser.`);
+      });
+    }
+
+    function toggleTokenReveal() {
+      const inp = document.getElementById('remoteTokenInput');
+      const btn = document.getElementById('revealTokenBtn');
+      if (!inp || !btn) return;
+      const hidden = inp.type === 'password';
+      inp.type = hidden ? 'text' : 'password';
+      btn.textContent = hidden ? 'Hide' : 'Show';
+    }
+
+    function copyRawToken() {
+      const tok = remoteInfo?.token || document.getElementById('remoteTokenInput')?.value || '';
+      if (!tok) return;
+      navigator.clipboard.writeText(tok).then(() => showToast('Access token copied to clipboard.'));
+    }
+
+    async function rotateRemoteToken() {
+      const res = await fetch('/v1/remote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'rotate_token' })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        applyRemoteInfo(data);
+        showToast('Access token rotated. Re-copy your Magic Link for remote devices.');
+      }
+    }
+
+    function copyLaptopAgentPrompt() {
+      if (!remoteInfo) { showToast('Loading remote info…'); return; }
+      const a = cleanName(document.getElementById('remoteAgentNameInput')?.value || 'laptop') || 'laptop';
+      const proj = getTargetProjectForPrompt();
+      const targetUrl = remoteInfo.tunnel_url || remoteInfo.lan_url || window.location.origin;
+      const tok = remoteInfo.token || '<READ_FROM_.relay-token>';
+      const prompt = [
+        `You are \`${a}\`, a remote Antigravity / coding agent running on Melo's laptop, connected to the Office WE Relay at \`${targetUrl}\` on project \`${proj}\`.`,
+        ``,
+        `### Step 1 — Ensure WE Relay CLI is present & set connection env vars`,
+        `If \`we-relay\` is not cloned yet on this laptop, clone \`https://github.com/WEPRIMUS/we-relay.git\`.`,
+        `Set these environment variables in your shell before calling \`cli.py\` (or pass \`--url\` and \`--token\`):`,
+        `- PowerShell: \`$env:PYTHONIOENCODING='utf-8'; $env:RELAY_URL='${targetUrl}'; $env:RELAY_TOKEN='${tok}'\``,
+        `- Bash/macOS: \`export RELAY_URL='${targetUrl}' RELAY_TOKEN='${tok}'\``,
+        ``,
+        `### Step 2 — Register & read your inbox from the Office Relay`,
+        `1. Register online: \`python cli.py status --project ${proj} --agent ${a} --role "Remote Laptop Agent" --state working --detail "Connected from laptop"\``,
+        `2. Read unread tasks/handoffs: \`python cli.py inbox --project ${proj} --agent ${a} --unread\``,
+        `3. Search relay history anytime: \`python cli.py search "<keywords>" --project ${proj}\``,
+        `4. Download any attached file from the office machine: \`python cli.py download --attachment <saved_name_or_url> --out ./<filename>\``,
+        `5. Reply in thread when done: \`python cli.py reply --id <msg-id> --from ${a} --body "<summary of what you completed on laptop>"\``,
+        `6. Or wire MCP stdio server directly: command \`python /path/to/we-relay/mcp_server.py\` with env \`RELAY_URL=${targetUrl}\` and \`RELAY_TOKEN=${tok}\`.`
+      ].join('\n');
+      navigator.clipboard.writeText(prompt).then(() => {
+        showToast(`Laptop Antigravity prompt for '${a}' copied! Paste it into your laptop session.`);
+      });
     }
 
     // Start-up: apply saved settings, then load data and open the live stream.
@@ -5301,8 +6046,15 @@
     document.getElementById('setAddress').value = window.location.origin;
     document.getElementById('aboutMark').src = document.querySelector('link[rel="icon"]').href;
     fetchSnapshot();
+    fetchRemoteInfo();
     connectSSE();
-    setInterval(fetchSnapshot, 8000);
+    // Smart efficiency: zero-polling while SSE is live; 10s fallback only if SSE drops; 30s local relative-time refresh
+    setInterval(() => {
+      if (!es || es.readyState !== EventSource.OPEN) fetchSnapshot();
+    }, 10000);
+    setInterval(() => {
+      if (allStatuses.length) renderStatuses();
+    }, 30000);
   </script>
 </body>
 </html>

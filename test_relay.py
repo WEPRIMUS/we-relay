@@ -1167,5 +1167,142 @@ class ThreadReplyTests(LiveServerCase):
         self.assertIn("APPROVED", auto_reply["body"])
 
 
+class V04ModernAndRemoteTests(LiveServerCase):
+    def test_fts5_search_endpoint_and_cli_respect_privacy(self):
+        self.run_cli(
+            "send", "--project", "mile-ultima", "--from", "cris", "--to", "keel",
+            "--subject", "Postquadratic routing engine", "--body", "Implemented fast SQLite FTS5 indexing.",
+        )
+        self.run_cli(
+            "send", "--project", "mile-ultima", "--from", "cris", "--to", "atlas",
+            "--subject", "Confidential audit note", "--body", "FTS5 secret review note.", "--private",
+        )
+
+        # Operator search (no agent) sees both
+        status, _, body = self.http("GET", "/v1/search?q=FTS5")
+        self.assertEqual(status, 200)
+        results = json.loads(body)["messages"]
+        self.assertEqual(len(results), 2)
+
+        # Third-party agent search hides private message
+        res_omni = json.loads(
+            self.run_cli("--json", "search", "FTS5", "--project", "mile-ultima", "--agent", "omni-c").stdout
+        )
+        self.assertEqual([m["subject"] for m in res_omni], ["Postquadratic routing engine"])
+
+        # Hyphenated token & #id lookup
+        by_id = json.loads(self.run_cli("--json", "search", "#1").stdout)
+        self.assertEqual([m["id"] for m in by_id], [1])
+
+    def test_smart_remote_auth_magic_link_and_cli_download(self):
+        token = self.srv.relay_state.auth_token
+        self.assertTrue(len(token) >= 32)
+
+        # 1. Direct loopback works with zero token
+        st_local, _, _ = self.http("GET", "/v1/messages")
+        self.assertEqual(st_local, 200)
+
+        # 2. Simulated Cloudflare tunnel request without token is blocked
+        tunnel_hdrs = {"CF-Connecting-IP": "203.0.113.42"}
+        st_unauth, _, _ = self.http("GET", "/v1/messages", headers=tunnel_hdrs)
+        self.assertEqual(st_unauth, 401)
+
+        # Browser GET / over tunnel without cookie gets the unlock login HTML (200)
+        st_login, _, login_html = self.http("GET", "/", headers=tunnel_hdrs)
+        self.assertEqual(st_login, 200)
+        self.assertIn(b"Protected Remote Relay", login_html)
+
+        # 3. Magic Link (?token=...) sets HttpOnly cookie and 302-redirects stripping token
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        opener = urllib.request.build_opener(NoRedirect)
+        req = urllib.request.Request(
+            f"{self.base_url}/?project=demo&token={token}",
+            headers={"CF-Connecting-IP": "203.0.113.42"},
+        )
+        try:
+            opener.open(req, timeout=5)
+            self.fail("Expected 302 redirect")
+        except urllib.error.HTTPError as e:
+            with e:
+                self.assertEqual(e.code, 302)
+                self.assertEqual(e.headers["Location"], "/?project=demo")
+                self.assertIn("we_relay_auth=", e.headers["Set-Cookie"])
+                self.assertIn("HttpOnly", e.headers["Set-Cookie"])
+
+        # 4. Bearer token over tunnel succeeds + cli.py download pulls attachment
+        st_bearer, _, _ = self.http(
+            "GET", "/v1/messages",
+            headers={"CF-Connecting-IP": "203.0.113.42", "Authorization": f"Bearer {token}"},
+        )
+        self.assertEqual(st_bearer, 200)
+
+        raw_payload = b"remote-laptop-handoff-bundle-2026"
+        _, att = self.upload("bundle.bin", raw_payload)
+        out_file = self.tmp_path / "downloaded-bundle.bin"
+        dl = self.run_cli("--token", token, "download", "--attachment", att["saved_name"], "--out", str(out_file))
+        self.assertEqual(dl.returncode, 0, dl.stderr)
+        self.assertEqual(out_file.read_bytes(), raw_payload)
+
+    def test_gzip_compression_and_pwa_manifest(self):
+        # Create enough text to exceed 1024-byte gzip threshold
+        self.http("POST", "/v1/messages", {
+            "project": "demo", "sender": "cris", "recipient": "all",
+            "subject": "Large payload", "body": "Modern relay efficiency test. " * 120,
+        })
+        import gzip as gz
+        st, hdrs, raw = self.http("GET", "/v1/messages?project=demo", headers={"Accept-Encoding": "gzip"})
+        self.assertEqual(st, 200)
+        self.assertEqual(hdrs.get("Content-Encoding"), "gzip")
+        decoded = json.loads(gz.decompress(raw).decode("utf-8"))
+        self.assertEqual(decoded["messages"][0]["subject"], "Large payload")
+
+        st_man, _, man_raw = self.http("GET", "/manifest.json")
+        self.assertEqual(st_man, 200)
+        self.assertEqual(json.loads(man_raw)["short_name"], "WE Relay")
+
+        _, _, dash_raw = self.http("GET", "/")
+        dash_html = dash_raw.decode("utf-8")
+        for needle in ("v0.4.0", "cmdDialog", "remoteDialog", "copyLaptopAgentPrompt"):
+            self.assertIn(needle, dash_html)
+
+    def test_mcp_stdio_server_round_trip(self):
+        mcp_path = Path(__file__).with_name("mcp_server.py")
+        rpc_lines = [
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+            json.dumps({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {
+                    "name": "relay_send",
+                    "arguments": {
+                        "project": "demo", "sender": "laptop", "recipient": "cris",
+                        "subject": "MCP bridge hello", "body": "Sent via mcp_server.py!",
+                    },
+                },
+            }),
+            json.dumps({
+                "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                "params": {"name": "relay_search", "arguments": {"query": "MCP bridge", "project": "demo"}},
+            }),
+        ]
+        env = {**os.environ, "RELAY_URL": self.base_url, "RELAY_TOKEN": self.srv.relay_state.auth_token}
+        proc = subprocess.run(
+            [sys.executable, str(mcp_path)],
+            input="\n".join(rpc_lines) + "\n",
+            capture_output=True, text=True, encoding="utf-8", env=env, timeout=15, check=True,
+        )
+        responses = [json.loads(line) for line in proc.stdout.strip().splitlines() if line.strip()]
+        self.assertEqual([r["id"] for r in responses], [1, 2, 3, 4])
+        tool_names = {t["name"] for t in responses[1]["result"]["tools"]}
+        self.assertIn("relay_send", tool_names)
+        self.assertIn("relay_search", tool_names)
+        search_payload = json.loads(responses[3]["result"]["content"][0]["text"])
+        self.assertEqual(search_payload["count"], 1)
+        self.assertEqual(search_payload["messages"][0]["subject"], "MCP bridge hello")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
