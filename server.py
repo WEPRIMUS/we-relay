@@ -541,7 +541,7 @@ class RelayState:
                     )
                     msg_total = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
                     if msg_total > 0:
-                        fts_total = conn.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0]
+                        fts_total = conn.execute("SELECT COUNT(*) FROM messages_fts_docsize").fetchone()[0]
                         if fts_total != msg_total:
                             conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
                     self.fts_enabled = True
